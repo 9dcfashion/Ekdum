@@ -1,0 +1,8 @@
+.next
+node_modules
+pnpm-lock.yaml
+public
+coverage
+playwright-report
+test-results
+MASTER_PROMPT_PHASE1.md
