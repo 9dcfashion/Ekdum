@@ -49,9 +49,19 @@ export const businessDetailsSchema = z
     return { ...v, gstin: parsed.gstin, pan: v.pan ?? parsed.pan ?? null };
   });
 
+/** The line under the shop name on the bill, e.g. "Wholesale Dealer in: Fancy Jewellery". */
+export const invoiceTagline = optionalText(120);
+
+/** Common titles for the person who signs bills. Anything else can be typed in. */
+export const SIGNATORY_TITLES = ["Proprietor", "Partner", "Director", "Authorised Signatory", "Manager"] as const;
+
+/** The title printed under "For {shop}" on the bill. */
+export const signatoryLabel = requiredText("Signature title", 40);
+
 export const brandingSchema = z.object({
   logo_path: z.string().max(300).nullish().transform((v) => v || null),
   brand_color: hexColor,
+  invoice_tagline: invoiceTagline,
 });
 
 export const paymentDetailsSchema = z.object({
@@ -105,6 +115,7 @@ export const invoiceSettingsSchema = z.object({
   round_off_enabled: z.boolean(),
   invoice_terms: optionalText(1000),
   invoice_footer: optionalText(300),
+  signatory_label: signatoryLabel,
 });
 
 export const quickProductSchema = z.object({

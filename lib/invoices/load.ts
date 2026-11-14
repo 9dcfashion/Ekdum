@@ -7,7 +7,7 @@ import type { InvoiceBundle, InvoiceBusiness, InvoiceItemRow, InvoiceOutlet, Inv
 const BUSINESS_DOCUMENT_COLUMNS =
   "id, legal_name, trade_name, gst_scheme, state_code, address_line1, address_line2, city, pincode, phone, email, " +
   "logo_path, brand_color, bank_name, bank_account_name, bank_account_number, ifsc, upi_id, invoice_terms, " +
-  "invoice_footer, hsn_digits";
+  "invoice_footer, invoice_tagline, signatory_label, hsn_digits";
 
 /** Extra columns for signed-in / worker use: print format and the delivery switches. */
 const BUSINESS_INTERNAL_COLUMNS =

@@ -17,6 +17,9 @@
 --   20261112000700_reports.sql
 --   20261112000800_storage.sql
 --   20261112000900_grants.sql
+--   20261113000100_sale_photos.sql
+--   20261113000200_invoice_format.sql
+--   20261113000300_quick_items.sql
 -- ════════════════════════════════════════════════════════════════════════════
 
 begin;
@@ -4133,8 +4136,12 @@ create policy ekdum_shipment_receipts_delete on storage.objects for delete to au
 --   authenticated  → table access (always filtered by RLS) + the RPCs listed below.
 --   service_role   → everything (server only; never shipped to the browser).
 --
--- IMPORTANT for future migrations: new functions are NOT callable through the
--- API until they are granted here-style, and new tables need RLS + a grant.
+-- IMPORTANT for future migrations: Postgres lets PUBLIC (and therefore anon)
+-- execute every NEW function by default, and the schema-level revoke below
+-- cannot undo that global default. Every later migration must therefore
+-- `revoke execute on function … from public, anon, authenticated` for each new
+-- function, then grant only what is needed. New tables need RLS + explicit grants.
+-- supabase/tests/00_migrations.test.ts fails if anon can execute any function.
 
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
@@ -4212,5 +4219,243 @@ grant execute on function public.vendor_payables(uuid)                          
 -- Server-only (service role): post_sales_invoice, save_purchase_bill,
 -- accept_invitation, claim_notification_jobs, complete_notification_job,
 -- check_rate_limit and all internal helpers.
+
+
+-- ▶ 20261113000100_sale_photos.sql
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- EkDum · 11 · Photos of the goods handed over on a bill
+-- ════════════════════════════════════════════════════════════════════════════
+-- Optional proof photos attached to a sales invoice (what was given to the
+-- customer), mainly for manual items that are not in the product list.
+-- Stored in their own table so posted invoices stay immutable. Rows are
+-- append-only; only owners and managers (sales.cancel) can remove a photo,
+-- and every removal is written to the audit log.
+-- Object path: sale-photos/{business_id}/{invoice_id}/{file}
+
+create table public.sales_invoice_photos (
+  id            uuid primary key default gen_random_uuid(),
+  business_id   uuid not null references public.businesses (id) on delete cascade,
+  invoice_id    uuid not null references public.sales_invoices (id) on delete cascade,
+  storage_path  text not null unique,
+  created_by    uuid references auth.users (id) on delete set null,
+  created_at    timestamptz not null default now(),
+  constraint sales_invoice_photos_path_scoped check (
+    storage_path like business_id::text || '/' || invoice_id::text || '/%'
+    and length(storage_path) <= 300
+  )
+);
+
+create index sales_invoice_photos_invoice_idx on public.sales_invoice_photos (invoice_id, created_at);
+create index sales_invoice_photos_business_idx on public.sales_invoice_photos (business_id);
+
+-- The invoice must belong to the business, and a bill holds at most 10 photos.
+create or replace function public.guard_sales_invoice_photos()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if tg_op = 'UPDATE' then
+    raise exception 'Bill photos cannot be changed. Remove the photo and add it again.';
+  end if;
+
+  if tg_op = 'DELETE' then
+    if exists (select 1 from public.businesses b where b.id = old.business_id) then
+      perform public.write_audit(old.business_id, auth.uid(), 'sale.photo_removed', 'sales_invoices', old.invoice_id,
+        jsonb_build_object('storage_path', old.storage_path, 'added_by', old.created_by, 'added_at', old.created_at), null);
+    end if;
+    return old;
+  end if;
+
+  if not exists (
+    select 1 from public.sales_invoices i where i.id = new.invoice_id and i.business_id = new.business_id
+  ) then
+    raise exception 'Bill not found';
+  end if;
+  if (select count(*) from public.sales_invoice_photos p where p.invoice_id = new.invoice_id) >= 10 then
+    raise exception 'A bill can have at most 10 photos';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger sales_invoice_photos_guard before insert or update or delete on public.sales_invoice_photos
+  for each row execute function public.guard_sales_invoice_photos();
+
+-- New functions are executable by PUBLIC by default; trigger functions never need to be.
+revoke execute on function public.guard_sales_invoice_photos() from public, anon, authenticated;
+
+-- ── Row Level Security ──────────────────────────────────────────────────────
+
+alter table public.sales_invoice_photos enable row level security;
+
+-- Visible exactly when the bill itself is visible (RLS on sales_invoices applies in the subquery).
+create policy sales_invoice_photos_select on public.sales_invoice_photos for select to authenticated
+  using (exists (select 1 from public.sales_invoices i where i.id = invoice_id));
+
+-- Anyone who can bill may add photos to a bill they can see (a cashier: only their own bills).
+create policy sales_invoice_photos_insert on public.sales_invoice_photos for insert to authenticated
+  with check (
+    public.has_perm(business_id, 'sales.create')
+    and created_by = (select auth.uid())
+    and exists (
+      select 1 from public.sales_invoices i
+      where i.id = invoice_id and i.business_id = sales_invoice_photos.business_id and i.status = 'posted'
+    )
+  );
+
+create policy sales_invoice_photos_delete on public.sales_invoice_photos for delete to authenticated
+  using (public.has_perm(business_id, 'sales.cancel') and exists (select 1 from public.sales_invoices i where i.id = invoice_id));
+
+-- Supabase grants ALL on new tables to anon and authenticated by default, and
+-- TRUNCATE ignores RLS. Start from nothing, then grant only what the policies cover.
+revoke all on public.sales_invoice_photos from public, anon, authenticated;
+grant select, insert, delete on public.sales_invoice_photos to authenticated;
+grant all on public.sales_invoice_photos to service_role;
+
+-- ── Storage ─────────────────────────────────────────────────────────────────
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types) values
+  ('sale-photos', 'sale-photos', false, 5242880, array['image/png', 'image/jpeg', 'image/webp'])
+on conflict (id) do update
+  set public = excluded.public,
+      file_size_limit = excluded.file_size_limit,
+      allowed_mime_types = excluded.allowed_mime_types;
+
+-- Path segment n (1-based) as a uuid, or null when it is not one.
+create or replace function public.storage_uuid_segment(p_name text, p_index integer)
+returns uuid
+language plpgsql
+immutable
+set search_path = public, pg_temp
+as $$
+begin
+  return split_part(p_name, '/', p_index)::uuid;
+exception when others then
+  return null;
+end;
+$$;
+
+revoke execute on function public.storage_uuid_segment(text, integer) from public, anon;
+grant execute on function public.storage_uuid_segment(text, integer) to authenticated;
+
+-- Read: when the bill in the path is visible to the user.
+create policy ekdum_sale_photos_select on storage.objects for select to authenticated
+  using (
+    bucket_id = 'sale-photos'
+    and exists (
+      select 1 from public.sales_invoices i
+      where i.id = public.storage_uuid_segment(name, 2) and i.business_id = public.storage_uuid_segment(name, 1)
+    )
+  );
+
+-- Upload: needs sales.create and a visible, posted bill in the path.
+create policy ekdum_sale_photos_insert on storage.objects for insert to authenticated
+  with check (
+    bucket_id = 'sale-photos'
+    and public.has_perm(public.storage_uuid_segment(name, 1), 'sales.create')
+    and exists (
+      select 1 from public.sales_invoices i
+      where i.id = public.storage_uuid_segment(name, 2) and i.business_id = public.storage_uuid_segment(name, 1)
+        and i.status = 'posted'
+    )
+  );
+
+-- Delete: owners and managers only, matching the table policy.
+create policy ekdum_sale_photos_delete on storage.objects for delete to authenticated
+  using (bucket_id = 'sale-photos' and public.has_perm(public.storage_uuid_segment(name, 1), 'sales.cancel'));
+
+
+-- ▶ 20261113000200_invoice_format.sql
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- EkDum · 12 · Invoice header and signature line
+-- ════════════════════════════════════════════════════════════════════════════
+-- The bill format shopkeepers already use carries a "what we deal in" line under
+-- the shop name (e.g. "Wholesale Dealer in: Stone Settled Exclusive Fancy
+-- Jewellery") and signs off with a title such as "Proprietor" or "Partner".
+
+alter table public.businesses
+  add column if not exists invoice_tagline text
+    check (invoice_tagline is null or length(invoice_tagline) <= 120),
+  add column if not exists signatory_label text not null default 'Authorised Signatory'
+    check (length(trim(signatory_label)) between 1 and 40);
+
+
+-- ▶ 20261113000300_quick_items.sql
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- EkDum · 13 · Quick billing items
+-- ════════════════════════════════════════════════════════════════════════════
+-- Preset item buttons for fast billing on a phone: the cashier taps "Necklace",
+-- types the rate (and quantity), and the line goes on the bill with the shop's
+-- GST rate, HSN code and unit already set. Billed as manual lines (no product,
+-- no stock), so a shop can bill without building a product catalogue first.
+
+create table public.quick_items (
+  id                  uuid primary key default gen_random_uuid(),
+  business_id         uuid not null references public.businesses (id) on delete cascade,
+  name                text not null check (length(trim(name)) between 1 and 60),
+  gst_rate            numeric(5,2) not null default 0 check (gst_rate >= 0 and gst_rate <= 100),
+  hsn_code            text check (hsn_code is null or hsn_code ~ '^([0-9]{4}|[0-9]{6}|[0-9]{8})$'),
+  unit_code           text not null default 'PCS' references public.units (code),
+  -- Wholesale bills usually quote the rate before GST (the reference bill does).
+  price_includes_tax  boolean not null default false,
+  default_rate_paise  bigint check (default_rate_paise is null or default_rate_paise > 0),
+  sort_order          integer not null default 0,
+  is_active           boolean not null default true,
+  created_by          uuid references auth.users (id) on delete set null,
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+
+create unique index quick_items_name_uniq on public.quick_items (business_id, lower(trim(name)));
+create index quick_items_business_idx on public.quick_items (business_id, sort_order) where is_active;
+create index quick_items_unit_idx on public.quick_items (unit_code);
+create trigger quick_items_set_updated_at before update on public.quick_items
+  for each row execute function public.set_updated_at();
+
+-- Keep the list short enough to stay quick on a phone.
+create or replace function public.guard_quick_items()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if tg_op = 'UPDATE' and new.business_id <> old.business_id then
+    raise exception 'A quick item cannot be moved to another business';
+  end if;
+  if tg_op = 'INSERT' and (select count(*) from public.quick_items q where q.business_id = new.business_id) >= 60 then
+    raise exception 'You can have at most 60 quick items';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger quick_items_guard before insert or update on public.quick_items
+  for each row execute function public.guard_quick_items();
+
+revoke execute on function public.guard_quick_items() from public, anon, authenticated;
+
+alter table public.quick_items enable row level security;
+
+-- Every member can bill with them; owners and managers (products.manage or settings.manage) maintain them.
+create policy quick_items_select on public.quick_items for select to authenticated
+  using (public.is_member(business_id));
+create policy quick_items_insert on public.quick_items for insert to authenticated
+  with check (public.has_perm(business_id, 'products.manage') or public.has_perm(business_id, 'settings.manage'));
+create policy quick_items_update on public.quick_items for update to authenticated
+  using (public.has_perm(business_id, 'products.manage') or public.has_perm(business_id, 'settings.manage'))
+  with check (public.has_perm(business_id, 'products.manage') or public.has_perm(business_id, 'settings.manage'));
+create policy quick_items_delete on public.quick_items for delete to authenticated
+  using (public.has_perm(business_id, 'products.manage') or public.has_perm(business_id, 'settings.manage'));
+
+-- Supabase grants ALL on new tables by default (and TRUNCATE ignores RLS): start from nothing.
+revoke all on public.quick_items from public, anon, authenticated;
+grant select, insert, update, delete on public.quick_items to authenticated;
+grant all on public.quick_items to service_role;
 
 commit;

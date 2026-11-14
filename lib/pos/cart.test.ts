@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { computeInvoice, gstinCheckChar } from "@/lib/gst";
 import { saleInputSchema } from "@/lib/validation/sales";
 import {
+  addManualItem,
   addProduct,
   buildPosContext,
   buildSaleInput,
@@ -24,11 +25,12 @@ import {
   setQuantity,
   setSupplyType,
   setUnitPrice,
+  isManualLine,
   syncCartWithCatalog,
 } from "./cart";
 import { createLocalParkedStore, toParkedBill } from "./parked";
 import { buildCatalogIndex, resolveScan, searchCatalog } from "./search";
-import type { CartResult, CartState, CatalogProduct, PaymentEntry, PosContext } from "./types";
+import type { CartResult, CartState, CatalogProduct, ManualItemInput, PaymentEntry, PosContext } from "./types";
 
 const UUID = "0b9f4c2e-6f1d-4a57-9d55-2f0d3c7a1e11";
 const gstin = (first14: string) => first14 + gstinCheckChar(first14);
@@ -467,5 +469,98 @@ describe("held bills", () => {
     expect(await createLocalParkedStore("a", storage).list()).toEqual([]);
     await createLocalParkedStore("a", storage).save(toParkedBill(emptyCart(UUID), 0));
     expect(await createLocalParkedStore("b", storage).list()).toEqual([]);
+  });
+});
+
+
+describe("manual items (not in the product list)", () => {
+  const manual = (over: Partial<ManualItemInput> = {}): ManualItemInput => ({
+    key: "manual-1",
+    name: "  Silk   saree ",
+    quantity: "1",
+    unitPricePaise: 2500_00,
+    priceIncludesTax: true,
+    gstRate: 5,
+    hsnCode: "5007",
+    unitCode: "PCS",
+    allowDecimal: false,
+    ...over,
+  });
+
+  it("adds a line with no product, no stock tracking and a tidy name", () => {
+    const cart = must(addManualItem(emptyCart(UUID), manual(), ctx));
+    const line = cart.lines[0];
+    expect(isManualLine(line)).toBe(true);
+    expect(line).toMatchObject({ productId: null, name: "Silk saree", trackInventory: false, stock: null, hsnCode: "5007" });
+    expect(line.listPricePaise).toBe(line.unitPricePaise);
+  });
+
+  it("is never blocked by stock, even when negative stock is not allowed", () => {
+    const cart = must(addManualItem(emptyCart(UUID), manual({ quantity: "50" }), { ...ctx, allowNegativeStock: false }));
+    expect(cartIssues(cart, ctx).filter((i) => i.code === "insufficient_stock")).toEqual([]);
+  });
+
+  it("lets a cashier without price-override permission set and correct its price", () => {
+    let cart = must(addManualItem(emptyCart(UUID), manual(), { ...ctx, canOverridePrice: false }));
+    cart = must(setUnitPrice(cart, "manual-1", 2400_00, { ...ctx, canOverridePrice: false }));
+    expect(cart.lines[0].unitPricePaise).toBe(2400_00);
+    expect(cartIssues(cart, ctx).filter((i) => i.code === "price_override_denied")).toEqual([]);
+    expect(setUnitPrice(cart, "manual-1", 0, ctx).ok).toBe(false);
+  });
+
+  it("validates the input", () => {
+    const base = emptyCart(UUID);
+    expect(addManualItem(base, manual({ name: "   " }), ctx)).toEqual({ ok: false, error: "Enter the item name" });
+    expect(addManualItem(base, manual({ unitPricePaise: 0 }), ctx).ok).toBe(false);
+    expect(addManualItem(base, manual({ quantity: "1.5" }), ctx).ok).toBe(false); // PCS is whole units
+    expect(addManualItem(base, manual({ quantity: "1.5", allowDecimal: true, unitCode: "KGS" }), ctx).ok).toBe(true);
+    expect(addManualItem(base, manual({ hsnCode: "123" }), ctx)).toEqual({ ok: false, error: "HSN must be 4, 6 or 8 digits" });
+    expect(addManualItem(base, manual({ gstRate: Number.NaN }), ctx)).toEqual({ ok: false, error: "Select the GST rate" });
+    expect(addManualItem(base, manual({ unitCode: "pcs" }), ctx)).toEqual({ ok: false, error: "Select a unit" });
+  });
+
+  it("keeps two manual items with the same name as separate lines", () => {
+    let cart = must(addManualItem(emptyCart(UUID), manual(), ctx));
+    cart = must(addManualItem(cart, manual({ key: "manual-2" }), ctx));
+    expect(cart.lines).toHaveLength(2);
+    expect(addManualItem(cart, manual({ key: "manual-2" }), ctx).ok).toBe(false);
+  });
+
+  it("drops the GST rate for sellers who do not charge tax", () => {
+    const cart = must(addManualItem(emptyCart(UUID), manual({ gstRate: 18, priceIncludesTax: false }), { ...ctx, gstScheme: "composition" }));
+    expect(cart.lines[0]).toMatchObject({ gstRate: 0, priceIncludesTax: true });
+  });
+
+  it("survives a catalog refresh untouched", () => {
+    const cart = must(addManualItem(emptyCart(UUID), manual(), ctx));
+    expect(syncCartWithCatalog(cart, () => product())).toBe(cart);
+  });
+
+  it("builds a valid payload with product_id null, mixed with catalog items, and totals that match the engine", () => {
+    let cart = must(addProduct(emptyCart(UUID), product(), ctx));
+    cart = must(addManualItem(cart, manual({ quantity: "2", unitPricePaise: 350_00, gstRate: 18, priceIncludesTax: false, hsnCode: "" }), ctx));
+    const total = computeCart(cart, ctx).totals.totalPaise;
+    const built = buildSaleInput(cart, ctx, [{ mode: "cash", amountPaise: total, reference: "" }]);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const parsed = saleInputSchema.parse(built.input);
+    expect(parsed.lines[1]).toMatchObject({ product_id: null, description: "Silk saree", hsn_code: null, quantity: "2", unit_price_paise: 350_00 });
+    const engine = computeInvoice({
+      lines: [
+        { quantity: "1", unitPricePaise: 499_00, priceIncludesTax: true, gstRate: 5 },
+        { quantity: "2", unitPricePaise: 350_00, priceIncludesTax: false, gstRate: 18 },
+      ],
+      chargeTax: true,
+      isInterState: false,
+      roundOff: true,
+    });
+    expect(built.input.totals.totalPaise).toBe(engine.totalPaise);
+  });
+
+  it("can be held like any other line", () => {
+    const cart = must(addManualItem(emptyCart(UUID), manual(), ctx));
+    const parked = toParkedBill(cart, 2500_00);
+    expect(parked.cart.lines[0].productId).toBeNull();
+    expect(parked.itemCount).toBe(1);
   });
 });

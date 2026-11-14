@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useAppRouter as useRouter } from "@/lib/use-app-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Lock, ShieldAlert, Trash2 } from "lucide-react";
 import { useForm, useWatch } from "react-hook-form";

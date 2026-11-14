@@ -102,11 +102,112 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
   }
 }
 
+/** True for links a customer's phone can open (not localhost or a private network address). */
+export function isPublicUrl(url: string): boolean {
+  let host: string;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    host = parsed.hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "0.0.0.0") return false;
+  if (host === "[::1]" || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return false;
+  return !/^172\.(1[6-9]|2\d|3[01])\./.test(host);
+}
+
+/** The text sent with the invoice PDF. The bill link is added only when customers can open it. */
+export function evolutionCaption(m: WhatsAppInvoiceMessage): string {
+  const lines = [
+    `Hi ${m.customerName}, thank you for shopping at ${m.businessName}.`,
+    `Your bill ${m.invoiceNumber} for ${m.amount} is attached.`,
+  ];
+  if (isPublicUrl(m.publicUrl)) lines.push("", `View bill: ${m.publicUrl}`);
+  return lines.join("\n");
+}
+
+interface EvolutionErrorBody {
+  response?: { message?: unknown };
+  message?: unknown;
+  error?: unknown;
+}
+
+/** Maps an Evolution API error response to a short message, and whether a retry could help. */
+function describeEvolutionError(status: number, json: EvolutionErrorBody): { error: string; permanent: boolean } {
+  const detail = json.response?.message ?? json.message ?? json.error;
+  const items = Array.isArray(detail) ? detail : [detail];
+  // Sending to a number without WhatsApp: 400 with [{ exists: false, number, jid }].
+  if (items.some((d) => typeof d === "object" && d !== null && (d as { exists?: unknown }).exists === false)) {
+    return { error: "This number is not on WhatsApp", permanent: true };
+  }
+  if (status === 401 || status === 403) {
+    return { error: "Evolution API rejected the key (check EVOLUTION_API_KEY)", permanent: false };
+  }
+  if (status === 404) {
+    return { error: "Evolution instance not found (check EVOLUTION_INSTANCE)", permanent: false };
+  }
+  if (status === 413) return { error: "The invoice PDF is too large to send on WhatsApp", permanent: true };
+  const text = items
+    .map((d) => (typeof d === "string" ? d : d === undefined ? "" : JSON.stringify(d)))
+    .filter(Boolean)
+    .join("; ");
+  // Anything else (session disconnected, rate limit, server error) may pass on a later attempt.
+  return { error: `Evolution API returned ${status}${text ? `: ${text}` : ""}`, permanent: false };
+}
+
+/**
+ * Evolution API: a self-hosted WhatsApp gateway (github.com/evolution-foundation/evolution-api).
+ * Sends from an ordinary WhatsApp number linked to an Evolution instance, so no Meta account or
+ * approved template is needed. The invoice PDF is uploaded with the message (the gateway cannot
+ * fetch localhost links), captioned with the receipt text. See docs/RUNBOOK.md §5.5.
+ */
+export class EvolutionWhatsAppProvider implements WhatsAppProvider {
+  readonly name = "evolution";
+  readonly attachesPdf = true;
+
+  constructor(
+    private readonly baseUrl: string,
+    private readonly instance: string,
+    private readonly apiKey: string,
+  ) {}
+
+  async sendInvoice(m: WhatsAppInvoiceMessage): Promise<SendResult> {
+    const number = m.to.replace(/\D/g, "");
+    if (number.length < 10) return { ok: false, error: "Not a valid WhatsApp number", permanent: true };
+    if (!m.pdf) return { ok: false, error: "The invoice PDF was not rendered" };
+
+    const body = {
+      number,
+      mediatype: "document",
+      mimetype: "application/pdf",
+      fileName: m.pdfFilename,
+      caption: evolutionCaption(m),
+      media: m.pdf.toString("base64"),
+    };
+
+    try {
+      const response = await fetch(`${this.baseUrl}/message/sendMedia/${encodeURIComponent(this.instance)}`, {
+        method: "POST",
+        headers: { apikey: this.apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const json = (await response.json().catch(() => ({}))) as EvolutionErrorBody & { key?: { id?: string } };
+      if (!response.ok) return { ok: false, ...describeEvolutionError(response.status, json) };
+      return { ok: true, messageId: json.key?.id };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "WhatsApp send failed" };
+    }
+  }
+}
+
 let cached: WhatsAppProvider | undefined;
 
 export function getWhatsAppProvider(): WhatsAppProvider {
   if (cached) return cached;
-  if ((process.env.WHATSAPP_PROVIDER ?? "mock").toLowerCase() === "meta") {
+  const wanted = (process.env.WHATSAPP_PROVIDER ?? "mock").trim().toLowerCase();
+  if (wanted === "meta") {
     const id = process.env.META_WA_PHONE_NUMBER_ID;
     const token = process.env.META_WA_ACCESS_TOKEN;
     const template = process.env.META_WA_INVOICE_TEMPLATE_NAME;
@@ -115,6 +216,16 @@ export function getWhatsAppProvider(): WhatsAppProvider {
       return cached;
     }
     console.warn("[whatsapp] WHATSAPP_PROVIDER=meta but META_WA_* variables are missing. Using the mock provider.");
+  }
+  if (wanted === "evolution") {
+    const url = process.env.EVOLUTION_API_URL?.trim().replace(/\/+$/, "");
+    const instance = process.env.EVOLUTION_INSTANCE?.trim();
+    const key = process.env.EVOLUTION_API_KEY?.trim();
+    if (url && instance && key) {
+      cached = new EvolutionWhatsAppProvider(url, instance, key);
+      return cached;
+    }
+    console.warn("[whatsapp] WHATSAPP_PROVIDER=evolution but EVOLUTION_* variables are missing. Using the mock provider.");
   }
   cached = new ConsoleMockWhatsAppProvider();
   return cached;

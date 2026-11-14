@@ -6,8 +6,12 @@
 --   authenticated  → table access (always filtered by RLS) + the RPCs listed below.
 --   service_role   → everything (server only; never shipped to the browser).
 --
--- IMPORTANT for future migrations: new functions are NOT callable through the
--- API until they are granted here-style, and new tables need RLS + a grant.
+-- IMPORTANT for future migrations: Postgres lets PUBLIC (and therefore anon)
+-- execute every NEW function by default, and the schema-level revoke below
+-- cannot undo that global default. Every later migration must therefore
+-- `revoke execute on function … from public, anon, authenticated` for each new
+-- function, then grant only what is needed. New tables need RLS + explicit grants.
+-- supabase/tests/00_migrations.test.ts fails if anon can execute any function.
 
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;

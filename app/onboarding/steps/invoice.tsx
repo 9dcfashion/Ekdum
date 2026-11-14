@@ -1,7 +1,8 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm, useWatch } from "react-hook-form";
+import { Controller, useForm, useWatch } from "react-hook-form";
+import { SignatoryTitleField } from "@/components/settings/invoice-prefs-form";
 import { Field, NativeSelect } from "@/components/shared/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -27,6 +28,7 @@ export function InvoiceStep({ data }: { data: WizardData }) {
       round_off_enabled: b.round_off_enabled,
       invoice_terms: b.invoice_terms ?? "",
       invoice_footer: b.invoice_footer ?? "Thank you for shopping with us!",
+      signatory_label: b.signatory_label || "Authorised Signatory",
     },
   });
   const { errors } = form.formState;
@@ -101,6 +103,18 @@ export function InvoiceStep({ data }: { data: WizardData }) {
         <Field label="Footer note" htmlFor="invoice_footer" error={errors.invoice_footer?.message} className="sm:col-span-2">
           <Input id="invoice_footer" {...form.register("invoice_footer")} />
         </Field>
+        <Controller
+          control={form.control}
+          name="signatory_label"
+          render={({ field, fieldState }) => (
+            <SignatoryTitleField
+              value={field.value ?? ""}
+              onChange={field.onChange}
+              onBlur={field.onBlur}
+              error={fieldState.error?.message}
+            />
+          )}
+        />
       </div>
       <StepFooter step={5} pending={pending} />
     </form>

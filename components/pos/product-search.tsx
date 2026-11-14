@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ScanBarcode, X } from "lucide-react";
+import { PackagePlus, ScanBarcode, X } from "lucide-react";
 import { toast } from "sonner";
 import { formatINR, formatQty } from "@/lib/money";
 import { resolveScan, searchCatalog, type CatalogIndex } from "@/lib/pos/search";
@@ -22,6 +22,7 @@ export function ProductSearch({
   onAdd,
   onMoveToCart,
   onAdjustSelected,
+  onAddManual,
 }: {
   index: CatalogIndex;
   inputRef: React.RefObject<HTMLInputElement | null>;
@@ -33,6 +34,8 @@ export function ProductSearch({
   onMoveToCart: () => void;
   /** Plus / minus in an empty box change the selected line. */
   onAdjustSelected: (delta: number) => void;
+  /** Bill something that is not in the product list, prefilled with what was typed. */
+  onAddManual: (name: string) => void;
 }) {
   const [query, setQuery] = useState("");
   /** -1 until the cashier presses an arrow key or Enter opens the list. */
@@ -64,8 +67,19 @@ export function ProductSearch({
       setHighlight(0);
       return;
     }
-    toast.error(`No item found for "${query.trim()}"`);
-    inputRef.current?.select();
+    // Nothing matched: offer to bill it as a manual item. A barcode-looking string is more likely a scan of an unknown code.
+    if (/^\d{6,}$/.test(query.trim())) {
+      toast.error(`No item found for "${query.trim()}"`);
+      inputRef.current?.select();
+      return;
+    }
+    addManual();
+  }
+
+  function addManual() {
+    const name = query;
+    reset();
+    onAddManual(name);
   }
 
   function move(delta: number) {
@@ -152,7 +166,17 @@ export function ProductSearch({
           className="absolute inset-x-0 top-full z-20 mt-1 max-h-[min(24rem,60dvh)] overflow-y-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg"
         >
           {results.length === 0 ? (
-            <p className="px-3 py-4 text-center text-sm text-muted-foreground">No items match. Check the spelling or scan again.</p>
+            <div className="grid gap-2 px-3 py-3 text-center">
+              <p className="text-sm text-muted-foreground">No items match. Check the spelling or scan again.</p>
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={addManual}
+                className="mx-auto inline-flex min-h-10 items-center gap-2 rounded-lg border border-dashed px-3 text-sm font-medium text-primary hover:bg-primary/5"
+              >
+                <PackagePlus className="size-4" aria-hidden /> Add “{query.trim()}” as an item not in your list
+              </button>
+            </div>
           ) : (
             results.map((p, i) => {
               const stock = stockOf(p);

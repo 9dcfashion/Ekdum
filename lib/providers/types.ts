@@ -50,9 +50,16 @@ export interface WhatsAppInvoiceMessage {
   publicToken: string;
   /** Full public link, used by providers that take a whole URL. */
   publicUrl: string;
+  /** The rendered invoice PDF. Set only for providers with `attachesPdf` (they upload the file instead of linking it). */
+  pdf?: Buffer;
 }
 
 export interface WhatsAppProvider {
   readonly name: string;
+  /**
+   * True when the provider uploads the PDF itself rather than giving WhatsApp `pdfUrl` to fetch.
+   * The worker then renders the PDF and passes it as `message.pdf`.
+   */
+  readonly attachesPdf?: boolean;
   sendInvoice(message: WhatsAppInvoiceMessage): Promise<SendResult>;
 }

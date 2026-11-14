@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Minus, Plus, ScanBarcode, Trash2 } from "lucide-react";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { formatRate } from "@/lib/gst";
@@ -42,7 +43,17 @@ export function discountInputValue(discount: Discount): string {
 }
 
 /** Amount / percent switch that sits next to a discount field. */
-export function DiscountKindToggle({ kind, onChange, label }: { kind: Discount["kind"]; onChange: (kind: Discount["kind"]) => void; label: string }) {
+export function DiscountKindToggle({
+  kind,
+  onChange,
+  label,
+  className,
+}: {
+  kind: Discount["kind"];
+  onChange: (kind: Discount["kind"]) => void;
+  label: string;
+  className?: string;
+}) {
   return (
     <button
       type="button"
@@ -50,7 +61,10 @@ export function DiscountKindToggle({ kind, onChange, label }: { kind: Discount["
       aria-label={`${label}: switch to ${kind === "amount" ? "percent" : "rupees"}`}
       title={kind === "amount" ? "Discount in rupees. Tap for percent." : "Discount in percent. Tap for rupees."}
       onClick={() => onChange(kind === "amount" ? "percent" : "amount")}
-      className="h-8 w-8 shrink-0 rounded-lg border border-input bg-muted/50 text-sm font-medium text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+      className={cn(
+        "h-8 w-8 shrink-0 rounded-lg border border-input bg-muted/50 text-sm font-medium text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50",
+        className,
+      )}
     >
       {kind === "amount" ? "₹" : "%"}
     </button>
@@ -74,7 +88,9 @@ function Line({
   const gross = lineGrossPaise(line);
   const discount = lineDiscountPaise(line);
   const overStock = exceedsStock(line);
-  const overridden = line.unitPricePaise !== line.listPricePaise;
+  const manual = line.productId === null;
+  const overridden = !manual && line.unitPricePaise !== line.listPricePaise;
+  const canEditPrice = ctx.canOverridePrice || manual;
 
   function focusSibling(direction: 1 | -1, from: HTMLElement) {
     const sibling = (direction === 1 ? from.nextElementSibling : from.previousElementSibling) as HTMLElement | null;
@@ -132,6 +148,7 @@ function Line({
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">{line.name}</p>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            {manual ? <StatusBadge tone="indigo" label="Not in product list" /> : null}
             {line.sku ? <span className="truncate">{line.sku}</span> : null}
             <span>GST {formatRate(line.gstRate)}{line.priceIncludesTax ? " incl." : " extra"}</span>
             {overStock ? (
@@ -187,7 +204,7 @@ function Line({
       </div>
 
       <div className="w-24 shrink-0" role="cell">
-        {ctx.canOverridePrice ? (
+        {canEditPrice ? (
           <CommitInput
             aria-label={`Price of ${line.name}`}
             inputMode="decimal"
@@ -261,11 +278,14 @@ export function CartLines({
   ctx,
   selectedKey,
   handlers,
+  nothingToSell = false,
 }: {
   cart: CartState;
   ctx: PosContext;
   selectedKey: string | null;
   handlers: CartLineHandlers;
+  /** No products and no quick items: point the owner to where they are set up. */
+  nothingToSell?: boolean;
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background" role="table" aria-label="Bill items">
@@ -287,7 +307,21 @@ export function CartLines({
               <ScanBarcode className="size-6 text-muted-foreground" aria-hidden />
             </div>
             <p className="font-medium">The bill is empty</p>
-            <p className="max-w-xs text-sm text-muted-foreground">Scan a barcode, or type a name or SKU in the box above and press Enter.</p>
+            {nothingToSell ? (
+              <p className="max-w-sm text-sm text-muted-foreground">
+                There are no products or quick items to bill yet. Add them in{" "}
+                <Link href="/app/products" className="font-medium text-primary underline-offset-4 hover:underline">
+                  Products
+                </Link>{" "}
+                or{" "}
+                <Link href="/app/settings/quick-items" className="font-medium text-primary underline-offset-4 hover:underline">
+                  Settings, Quick billing items
+                </Link>
+                . Until then, use Not in list (F6).
+              </p>
+            ) : (
+              <p className="max-w-xs text-sm text-muted-foreground">Scan a barcode, or type a name or SKU in the box above and press Enter.</p>
+            )}
           </div>
         ) : (
           cart.lines.map((line, i) => (

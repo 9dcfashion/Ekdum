@@ -10,12 +10,13 @@ export default async function BrandingPage() {
   const preview = await loadPreviewBusiness(ctx);
 
   return (
-    <SettingsSection title="Branding" description="Your logo and colour on invoices, receipts and the bill page customers open.">
+    <SettingsSection title="Branding" description="Your logo, colour and the line under your shop name on invoices, receipts and the bill page customers open.">
       <BrandingForm
-        key={`${ctx.business.logo_path ?? ""}:${ctx.business.brand_color}`}
-        business={preview}
+        key={`${ctx.business.logo_path ?? ""}:${ctx.business.brand_color}:${ctx.business.invoice_tagline ?? ""}`}
+        business={{ ...preview, signatoryLabel: ctx.business.signatory_label }}
         initialLogoPath={ctx.business.logo_path}
         initialColor={ctx.business.brand_color}
+        initialTagline={ctx.business.invoice_tagline ?? null}
       />
     </SettingsSection>
   );

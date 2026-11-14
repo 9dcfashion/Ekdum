@@ -43,6 +43,14 @@ describe("migrations", () => {
     expect(fns.rows.map((x) => x.proname)).toEqual([]);
   });
 
+  it("never give signed-in users TRUNCATE, REFERENCES or TRIGGER (RLS does not cover them)", async () => {
+    const r = await db.query<{ t: string }>(
+      `select table_name || ':' || privilege_type as t from information_schema.role_table_grants
+       where grantee = 'authenticated' and table_schema = 'public' and privilege_type in ('TRUNCATE', 'REFERENCES', 'TRIGGER')`,
+    );
+    expect(r.rows.map((x) => x.t)).toEqual([]);
+  });
+
   it("keep server-only functions away from signed-in users", async () => {
     const r = await db.query<{ proname: string }>(
       `select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace

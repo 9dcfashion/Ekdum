@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useAppRouter as useRouter } from "@/lib/use-app-router";
 import { Check, ChevronsUpDown, LogOut, Menu, Plus, Store } from "lucide-react";
 import { signOutAction } from "@/app/(auth)/actions";
 import { switchBusinessAction, switchOutletAction } from "@/app/app/actions";
@@ -146,14 +146,16 @@ export function UserMenu({ data }: { data: ShellData }) {
 }
 
 /** Slide-in navigation for phones and small tablets. */
-export function MobileNav({ data }: { data: ShellData }) {
+export function MobileNav({ data, trigger }: { data: ShellData; trigger?: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild>
-        <Button variant="ghost" size="icon" className="lg:hidden" aria-label="Open menu">
-          <Menu />
-        </Button>
+        {trigger ?? (
+          <Button variant="ghost" size="icon" className="lg:hidden" aria-label="Open menu">
+            <Menu />
+          </Button>
+        )}
       </SheetTrigger>
       <SheetContent side="left" className="w-72 gap-0 p-0">
         <SheetHeader className="border-b p-4">

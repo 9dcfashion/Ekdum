@@ -4,7 +4,8 @@ import { upiPaymentUri } from "@/lib/gst/document";
 import { formatRate, summariseByRate, type RateSummaryRow } from "@/lib/gst/engine";
 import { getState, stateLabel } from "@/lib/gst/states";
 import { displayHsn, maskAccountNumber } from "@/lib/gst/validators";
-import { formatQty } from "@/lib/money";
+import { amountInWords } from "@/lib/gst/words";
+import { Decimal, formatQty, roundPaise } from "@/lib/money";
 import type { PaymentMode } from "@/lib/types/db";
 import type { InvoiceBundle } from "./types";
 
@@ -28,6 +29,10 @@ export interface InvoiceViewLine {
   unitPricePaise: number;
   priceIncludesTax: boolean;
   discountPaise: number;
+  /** Price per unit before GST: the Rate column of the A4 bill (see `preTaxPricing`). */
+  ratePaise: number;
+  /** Discount before GST: the Disc. column of the A4 bill. */
+  preTaxDiscountPaise: number;
   taxablePaise: number;
   /** "18%". Empty when tax columns are hidden. */
   gstRate: string;
@@ -60,6 +65,8 @@ export interface InvoiceView {
   cancelReason: string | null;
   brandColor: string;
   logoPath: string | null;
+  /** The line under the shop name, e.g. "Wholesale Dealer in: Fancy Jewellery". */
+  tagline: string | null;
 
   /** GST documents only (tax invoice, bill of supply). False for a cash memo. */
   showGstFields: boolean;
@@ -75,6 +82,8 @@ export interface InvoiceView {
     /** Legal name, only when it differs from the name shown. */
     legalName: string | null;
     outletName: string | null;
+    /** One line: address, city, state, PIN (the address row of the A4 bill). Null when nothing is set. */
+    addressRow: string | null;
   };
   /** Null when the bill has no customer details at all (walk-in sale). */
   recipient: InvoiceViewParty | null;
@@ -99,6 +108,8 @@ export interface InvoiceView {
   /** Empty unless tax is shown. */
   taxSummary: Array<RateSummaryRow & { rateLabel: string }>;
   amountInWords: string;
+  /** The tax (GST + cess, before round-off) in words. Tax invoices only. */
+  taxAmountInWords: string | null;
 
   payments: InvoiceViewPayment[];
   paidPaise: number;
@@ -127,10 +138,13 @@ export interface InvoiceView {
   footer: string | null;
   /** "Composition taxable person, not eligible to collect tax on supplies." */
   declaration: string | null;
-  /** "For {business name}" above "Authorised Signatory". */
+  /** "For {business name}" above the signatory title. */
   signatoryFor: string;
+  /** The business's signature title, e.g. "Proprietor". "Authorised Signatory" when not set. */
   signatoryLabel: string;
 }
+
+export const DEFAULT_SIGNATORY_LABEL = "Authorised Signatory";
 
 export const PAYMENT_MODE_LABELS: Record<PaymentMode, string> = {
   cash: "Cash",
@@ -165,6 +179,38 @@ function printState(code: string | null | undefined, withCode: boolean): string 
 }
 
 /**
+ * The Rate and Disc. columns of the A4 bill are printed before GST, so that on every line
+ * Qty x Rate - Disc. = Amount (the taxable value), and the Amount column adds up to the
+ * "Total Taxable Amount", as on the shopkeeper's own bill.
+ *
+ * - Price excludes tax: the unit price as entered; the discount was already given before tax.
+ * - Price includes tax (MRP style): the discount was given on the tax-inclusive price, so
+ *   pre-tax discount = discount / (1 + rate / 100) and rate = (taxable + pre-tax discount) / qty,
+ *   each rounded half-up to the paisa. `rate` is the line's GST rate plus its cess rate, the
+ *   same combined rate the engine backed out of the price (just the GST rate when there is no cess).
+ *   Because the per-unit rate is rounded, Qty x Rate - Disc. can differ from the printed Amount by
+ *   a few paise on odd quantities. The Amount is always the exact stored taxable value.
+ */
+export function preTaxPricing(item: {
+  quantity: number | string;
+  unit_price_paise: number;
+  price_includes_tax: boolean;
+  discount_paise: number;
+  taxable_paise: number;
+  gst_rate: number | string;
+  cess_rate: number | string;
+}): { ratePaise: number; discountPaise: number } {
+  const rate = new Decimal(item.gst_rate || 0).plus(item.cess_rate || 0);
+  const qty = new Decimal(String(item.quantity || 0));
+  if (!item.price_includes_tax || rate.isZero() || qty.lessThanOrEqualTo(0)) {
+    return { ratePaise: item.unit_price_paise, discountPaise: item.discount_paise };
+  }
+  const discountPaise = roundPaise(new Decimal(item.discount_paise).dividedBy(rate.dividedBy(100).plus(1)));
+  const ratePaise = roundPaise(new Decimal(item.taxable_paise + discountPaise).dividedBy(qty));
+  return { ratePaise, discountPaise };
+}
+
+/**
  * Turns the stored invoice into everything a renderer needs (A4 PDF, thermal
  * slip, public page, email). Pure: no I/O, no clock, no formatting of money
  * (each renderer formats paise for its own medium).
@@ -189,6 +235,14 @@ export function buildInvoiceView(bundle: InvoiceBundle): InvoiceView {
     clean(addressSource.address_line2),
     joinParts([addressSource.city, addressSource.pincode], " - "),
   ].filter((l): l is string => l !== null);
+  const sellerState = printState(invoice.seller_state_code, showGstFields);
+  const sellerAddressRow = joinParts([
+    addressSource.address_line1,
+    addressSource.address_line2,
+    addressSource.city,
+    sellerState,
+    addressSource.pincode,
+  ]);
 
   // ── Recipient ─────────────────────────────────────────────────────────────
   const customerAddress = splitLines(invoice.customer_address);
@@ -211,24 +265,29 @@ export function buildInvoiceView(bundle: InvoiceBundle): InvoiceView {
 
   // ── Lines ─────────────────────────────────────────────────────────────────
   const items = [...bundle.items].sort((a, b) => a.line_no - b.line_no);
-  const lines: InvoiceViewLine[] = items.map((item) => ({
-    lineNo: item.line_no,
-    description: item.description,
-    hsn: showGstFields ? displayHsn(item.hsn_code, hsnDigits) : "",
-    quantity: formatQty(item.quantity),
-    unit: item.unit_code,
-    unitPricePaise: item.unit_price_paise,
-    priceIncludesTax: item.price_includes_tax,
-    discountPaise: item.discount_paise,
-    taxablePaise: item.taxable_paise,
-    gstRate: showTax ? formatRate(item.gst_rate) : "",
-    cessRate: showTax && Number(item.cess_rate) > 0 ? formatRate(item.cess_rate) : "",
-    cgstPaise: showTax ? item.cgst_paise : 0,
-    sgstPaise: showTax ? item.sgst_paise : 0,
-    igstPaise: showTax ? item.igst_paise : 0,
-    cessPaise: showTax ? item.cess_paise : 0,
-    totalPaise: item.total_paise,
-  }));
+  const lines: InvoiceViewLine[] = items.map((item) => {
+    const pricing = preTaxPricing(item);
+    return {
+      lineNo: item.line_no,
+      description: item.description,
+      hsn: showGstFields ? displayHsn(item.hsn_code, hsnDigits) : "",
+      quantity: formatQty(item.quantity),
+      unit: item.unit_code,
+      unitPricePaise: item.unit_price_paise,
+      priceIncludesTax: item.price_includes_tax,
+      discountPaise: item.discount_paise,
+      ratePaise: pricing.ratePaise,
+      preTaxDiscountPaise: pricing.discountPaise,
+      taxablePaise: item.taxable_paise,
+      gstRate: showTax ? formatRate(item.gst_rate) : "",
+      cessRate: showTax && Number(item.cess_rate) > 0 ? formatRate(item.cess_rate) : "",
+      cgstPaise: showTax ? item.cgst_paise : 0,
+      sgstPaise: showTax ? item.sgst_paise : 0,
+      igstPaise: showTax ? item.igst_paise : 0,
+      cessPaise: showTax ? item.cess_paise : 0,
+      totalPaise: item.total_paise,
+    };
+  });
 
   const taxSummary = showTax
     ? summariseByRate(
@@ -284,6 +343,7 @@ export function buildInvoiceView(bundle: InvoiceBundle): InvoiceView {
       : null;
 
   const showCess = showTax && (invoice.cess_paise > 0 || items.some((i) => i.cess_paise > 0));
+  const taxPaise = showTax ? invoice.cgst_paise + invoice.sgst_paise + invoice.igst_paise + invoice.cess_paise : 0;
 
   return {
     id: invoice.id,
@@ -295,6 +355,7 @@ export function buildInvoiceView(bundle: InvoiceBundle): InvoiceView {
     cancelReason: cancelled ? clean(invoice.cancel_reason) : null,
     brandColor: /^#[0-9A-Fa-f]{6}$/.test(business.brand_color ?? "") ? business.brand_color : "#4338CA",
     logoPath: clean(business.logo_path),
+    tagline: clean(business.invoice_tagline),
 
     showGstFields,
     showTax,
@@ -307,12 +368,13 @@ export function buildInvoiceView(bundle: InvoiceBundle): InvoiceView {
       name: sellerName,
       legalName: legalName && legalName !== sellerName ? legalName : null,
       outletName: clean(outlet?.name),
+      addressRow: sellerAddressRow,
       phone: clean(outlet?.phone) ?? clean(business.phone),
       email: clean(business.email),
       addressLines: sellerAddress,
       // Never a GSTIN on a cash memo, whatever is stored.
       gstin: showGstFields ? clean(invoice.seller_gstin) : null,
-      state: printState(invoice.seller_state_code, showGstFields),
+      state: sellerState,
     },
     recipient: hasRecipient ? recipientFields : null,
     placeOfSupply: showGstFields ? printState(invoice.place_of_supply_state, true) : null,
@@ -327,12 +389,13 @@ export function buildInvoiceView(bundle: InvoiceBundle): InvoiceView {
       sgstPaise: showTax ? invoice.sgst_paise : 0,
       igstPaise: showTax ? invoice.igst_paise : 0,
       cessPaise: showTax ? invoice.cess_paise : 0,
-      taxPaise: showTax ? invoice.cgst_paise + invoice.sgst_paise + invoice.igst_paise + invoice.cess_paise : 0,
+      taxPaise,
       roundOffPaise: invoice.round_off_paise,
       totalPaise: invoice.total_paise,
     },
     taxSummary,
     amountInWords: invoice.amount_in_words,
+    taxAmountInWords: showTax ? amountInWords(taxPaise) : null,
 
     payments,
     paidPaise,
@@ -346,6 +409,6 @@ export function buildInvoiceView(bundle: InvoiceBundle): InvoiceView {
     footer: clean(business.invoice_footer),
     declaration: business.gst_scheme === "composition" ? COMPOSITION_DECLARATION : null,
     signatoryFor: `For ${sellerName}`,
-    signatoryLabel: "Authorised Signatory",
+    signatoryLabel: clean(business.signatory_label) ?? DEFAULT_SIGNATORY_LABEL,
   };
 }

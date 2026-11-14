@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { optionalText, requiredText, uuid, uuidOptional } from "./common";
-import { outletSchema, seriesPrefix } from "./onboarding";
+import { outletSchema, seriesPrefix, signatoryLabel } from "./onboarding";
 
 /** A whole number typed into a form field (forms submit strings). */
 export const wholeNumber = (label: string, min: number, max: number) =>
@@ -23,6 +23,7 @@ export const invoicePrefsFormSchema = z
     round_off_enabled: z.boolean(),
     invoice_terms: optionalText(1000),
     invoice_footer: optionalText(300),
+    signatory_label: signatoryLabel,
     hsn_digits: z.enum(["4", "6", "8"], "Choose 4, 6 or 8 digits"),
     bos_for_exempt_only: z.boolean(),
     cancel_window_mode: z.enum(CANCEL_WINDOW_MODES),
@@ -43,6 +44,7 @@ export const invoicePrefsSchema = invoicePrefsFormSchema.transform((v) => ({
   round_off_enabled: v.round_off_enabled,
   invoice_terms: v.invoice_terms,
   invoice_footer: v.invoice_footer,
+  signatory_label: v.signatory_label,
   hsn_digits: Number(v.hsn_digits) as 4 | 6 | 8,
   bos_for_exempt_only: v.bos_for_exempt_only,
   cancel_window_days: v.cancel_window_mode === "no_limit" ? null : v.cancel_window_mode === "same_day" ? 0 : Number(String(v.cancel_window_days).trim()),

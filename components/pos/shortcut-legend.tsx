@@ -11,6 +11,7 @@ export const POS_SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["+", "-"], label: "Change quantity of the selected line" },
   { keys: ["Delete"], label: "Remove the selected line" },
   { keys: ["F4"], label: "Customer" },
+  { keys: ["F6"], label: "Add an item not in your product list" },
   { keys: ["F8"], label: "Bill discount" },
   { keys: ["F9"], label: "Take payment" },
   { keys: ["Esc"], label: "Close, or clear the bill" },
@@ -29,7 +30,8 @@ export function ShortcutLegend() {
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <Button variant="outline" size="sm" aria-label="Keyboard shortcuts">
+        {/* Phones have no F-keys: the button only shows where the keyboard-first screen does. */}
+        <Button variant="outline" size="sm" aria-label="Keyboard shortcuts" className="hidden lg:inline-flex">
           <Keyboard aria-hidden />
           <span className="hidden md:inline">Shortcuts</span>
         </Button>

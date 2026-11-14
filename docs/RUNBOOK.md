@@ -24,6 +24,12 @@ from a fresh clone to a deployed app.
    Run it **once** on a fresh project.
 3. You should see "Success. No rows returned". Check **Table Editor**: about 35 tables, each with the RLS shield on.
 
+> **Already ran the schema before 13 Nov 2026?** Then run only the newer migration files, one at a
+> time and in this order, in the SQL Editor (never re-run the full `ekdum_schema.sql` on a project that has it):
+> 1. `supabase/migrations/20261113000100_sale_photos.sql`: photos of items given on a bill
+> 2. `supabase/migrations/20261113000200_invoice_format.sql`: shop tagline and signature title on the bill
+> 3. `supabase/migrations/20261113000300_quick_items.sql`: quick billing buttons (e.g. Necklace, Finger Ring)
+
 > `ekdum_schema.sql` is generated from `supabase/migrations/` by `pnpm db:bundle`.
 > Never change the database by hand in the dashboard. Add a new migration file, bundle, and run only the new file.
 
@@ -84,8 +90,12 @@ Open http://localhost:3000.
 7. **Sales → the bill**: delivery status, public link `/i/…` (open it in a private window), PDF.
 8. **Inventory**: stock went down by what you sold; the ledger shows the sale.
 9. **Purchases → New**: enter a vendor bill, attach a photo, post → stock goes up.
-10. **Sales → bill → Credit note**: return one item; stock comes back; the note has its own number.
-11. **Staff**: invite a cashier, accept the invite in another browser, confirm they only see POS and their own bills.
+10. **Manual item**: in the POS press F6 (or type a name that is not in your list and press Enter), add
+   the item with a price and GST rate, take payment, then use "Take photo" on the success panel.
+   The bill in Sales shows "Not in product list" on that line and the photo; the Sales list filter
+   "Items not in product list" finds it.
+11. **Sales → bill → Credit note**: return one item; stock comes back; the note has its own number.
+12. **Staff**: invite a cashier, accept the invite in another browser, confirm they only see POS and their own bills.
 
 ### Demo data (optional)
 
@@ -193,6 +203,38 @@ This takes days, not minutes, because Meta reviews the business and the template
    by Meta from `https://YOUR-DOMAIN/api/invoices/{id}/pdf?token=…`, so it only works on a public URL
    (not localhost).
 
+### 5.5 WhatsApp (Evolution API, self-hosted)
+
+Sends receipts from an ordinary WhatsApp number linked to an
+[Evolution API](https://github.com/evolution-foundation/evolution-api) instance. There's no Meta
+review and no template, so it works in minutes.
+
+1. In the Evolution manager (`https://YOUR-EVOLUTION-HOST/manager`), create an instance
+   (integration `WHATSAPP-BAILEYS`) and scan its QR code with the shop's phone (WhatsApp →
+   Linked devices).
+2. Copy the **instance token** from the instance card. It only works for that instance, so it's
+   safer than the server's global key.
+3. Set:
+   ```
+   WHATSAPP_PROVIDER=evolution
+   EVOLUTION_API_URL=https://evolution.nineagents.in   # no trailing slash
+   EVOLUTION_INSTANCE=…                                # the instance name
+   EVOLUTION_API_KEY=…                                 # the instance token
+   ```
+4. Restart the app. **Settings → Notifications** should show "Evolution API (self-hosted)".
+   Post a bill for an opted-in customer and check the delivery status on the bill page.
+
+How it differs from Meta:
+- The PDF is rendered by EkDum and uploaded with the message as a document, captioned
+  "Hi {name}, thank you for shopping at {shop}. Your bill {number} for {amount} is attached."
+  It works from `localhost` too. The "View bill" link is added to the caption only when
+  `NEXT_PUBLIC_APP_URL` is a public address.
+- Consent rules are unchanged: only customers with the WhatsApp opt-in get messages.
+- A number without WhatsApp fails at once and isn't retried. Other errors (phone offline,
+  session logged out, server down) are retried up to 5 times with backoff.
+- This is an unofficial gateway that links as a WhatsApp Web device. Use a dedicated shop number:
+  WhatsApp can ban numbers that get spam reports, and the phone must stay connected.
+
 A BSP (Gupshup, Interakt, AiSensy …) can be used instead by adding another class that
 implements `WhatsAppProvider` in `lib/providers/whatsapp.ts`.
 
@@ -219,8 +261,9 @@ Nothing to do. On 1 April (IST) each series rolls over automatically and numberi
 ### Changing the schema
 
 1. Add `supabase/migrations/<timestamp>_<name>.sql`. New tables need `enable row level security`,
-   policies, and grants (see the grants migration: new functions are not callable through the API
-   until granted).
+   policies, and grants (see the grants migration: every new function must explicitly
+   `revoke execute … from public, anon, authenticated` and then grant only what is needed, because
+   Postgres lets PUBLIC execute new functions by default).
 2. `pnpm test` (the migration test fails if a table has no RLS, a foreign key has no index, or a
    security-definer function has no fixed `search_path`).
 3. Run the new file in the SQL Editor (or `supabase db push` if you adopt the Supabase CLI), then `pnpm db:bundle`.

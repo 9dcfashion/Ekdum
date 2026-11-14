@@ -4,7 +4,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 export function PosSkeleton() {
   return (
     <div className="flex h-full flex-col lg:flex-row" aria-busy="true" aria-label="Loading billing screen">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Desktop: search, bill lines, toolbar | totals column */}
+      <div className="hidden min-h-0 min-w-0 flex-1 flex-col lg:flex">
         <div className="shrink-0 border-b bg-background p-2 sm:p-3">
           <Skeleton className="h-11 w-full" />
         </div>
@@ -28,9 +29,21 @@ export function PosSkeleton() {
         <Skeleton className="min-h-0 w-full flex-1" />
         <Skeleton className="h-14 w-full" />
       </div>
-      <div className="flex h-16 shrink-0 items-center gap-3 border-t bg-background px-3 lg:hidden">
-        <Skeleton className="h-8 flex-1" />
-        <Skeleton className="h-11 w-32" />
+
+      {/* Phone: search, item tiles, bill bar */}
+      <div className="flex min-h-0 flex-1 flex-col lg:hidden">
+        <div className="flex shrink-0 gap-2 border-b bg-background p-2">
+          <Skeleton className="h-12 flex-1 rounded-xl" />
+        </div>
+        <div className="grid min-h-0 flex-1 grid-cols-2 content-start gap-2 overflow-hidden p-2 sm:grid-cols-3 md:grid-cols-4">
+          {Array.from({ length: 12 }, (_, i) => (
+            <Skeleton key={i} className="h-24 rounded-xl" />
+          ))}
+        </div>
+        <div className="flex shrink-0 items-center gap-2 border-t bg-background px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+          <Skeleton className="h-14 flex-1 rounded-xl" />
+          <Skeleton className="h-14 w-28 rounded-xl" />
+        </div>
       </div>
     </div>
   );

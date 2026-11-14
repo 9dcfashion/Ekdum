@@ -7,6 +7,7 @@ import { RangeFilters } from "@/components/dashboard/range-filters";
 import { SalesTrendChart } from "@/components/dashboard/sales-trend-chart";
 import { TopProducts } from "@/components/dashboard/top-products";
 import { EmptyState } from "@/components/shared/empty-state";
+import { QuickActions } from "@/components/dashboard/quick-actions";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { Button } from "@/components/ui/button";
@@ -82,6 +83,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         title="Dashboard"
         description={`${outletName ?? (ctx.outlets.length > 1 ? "All outlets" : ctx.business.trade_name || ctx.business.legal_name)} · ${rangeLabel} (IST)`}
       />
+
+      <QuickActions canBill={ctx.can("sales.create")} canPurchase={ctx.can("purchases.create")} />
 
       <GettingStarted businessId={ctx.business.id} items={checklist} />
 

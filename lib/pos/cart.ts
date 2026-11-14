@@ -34,6 +34,7 @@ import type {
   CartState,
   CatalogProduct,
   Discount,
+  ManualItemInput,
   PaymentEntry,
   PosContext,
   PosCustomer,
@@ -195,6 +196,55 @@ export function addProduct(cart: CartState, product: CatalogProduct, ctx: PosCon
   return error ? fail(error) : ok({ ...cart, lines: [...cart.lines, line] });
 }
 
+/** True for an item typed in at the counter (not in the product list). */
+export function isManualLine(line: Pick<CartLine, "productId">): boolean {
+  return line.productId === null;
+}
+
+/**
+ * Add an item that is not in the product list (nothing in inventory for it).
+ * Its price is whatever the cashier types, so it never counts as a price
+ * override, and it moves no stock. A new manual line is always a separate row.
+ */
+export function addManualItem(cart: CartState, input: ManualItemInput, ctx: PosContext): CartResult {
+  const name = input.name.trim().replace(/\s+/g, " ");
+  if (!name) return fail("Enter the item name");
+  if (name.length > 200) return fail("The item name is too long");
+  if (!Number.isInteger(input.unitPricePaise) || input.unitPricePaise <= 0) return fail("Enter a price more than zero");
+  if (input.unitPricePaise > 99_99_99_999) return fail("The price is too large");
+  const parsed = parseQuantity(input.quantity, input.allowDecimal);
+  if (!parsed.ok) return fail(parsed.error);
+  const chargesTax = ctx.gstScheme === "regular";
+  const gstRate = chargesTax ? Number(input.gstRate) : 0;
+  if (!Number.isFinite(gstRate) || gstRate < 0 || gstRate > 100) return fail("Select the GST rate");
+  const hsn = input.hsnCode.trim();
+  if (hsn && !/^(\d{4}|\d{6}|\d{8})$/.test(hsn)) return fail("HSN must be 4, 6 or 8 digits");
+  if (!/^[A-Z]{2,4}$/.test(input.unitCode)) return fail("Select a unit");
+  if (cart.lines.some((l) => l.key === input.key)) return fail("That item is already on the bill");
+  if (cart.lines.length >= MAX_LINES) return fail(`A bill can have at most ${MAX_LINES} lines`);
+
+  const line: CartLine = {
+    key: input.key,
+    productId: null,
+    name,
+    sku: null,
+    barcode: null,
+    hsnCode: hsn || null,
+    unitCode: input.unitCode,
+    allowDecimal: input.allowDecimal,
+    gstRate,
+    cessRate: 0,
+    listPricePaise: input.unitPricePaise,
+    unitPricePaise: input.unitPricePaise,
+    priceIncludesTax: chargesTax ? input.priceIncludesTax : true,
+    trackInventory: false,
+    stock: null,
+    quantity: parsed.quantity,
+    discount: NO_DISCOUNT,
+  };
+  return ok({ ...cart, lines: [...cart.lines, line] });
+}
+
 export function setQuantity(cart: CartState, key: string, quantity: string | number, ctx: PosContext): CartResult {
   const line = findLine(cart, key);
   if (!line) return fail("That item is no longer on the bill");
@@ -222,12 +272,31 @@ export function removeLine(cart: CartState, key: string): CartState {
   return { ...cart, lines: cart.lines.filter((l) => l.key !== key) };
 }
 
-/** Change the price charged for a line. Needs the `sales.price_override` permission. */
+/**
+ * "Undo" after removing a line: put it back where it was. Does nothing (returns
+ * the same cart) when the bill has changed since (saved, cleared or held: a
+ * different `clientUuid`), when that item is already back on the bill, or when
+ * the bill is full.
+ */
+export function restoreLine(cart: CartState, removed: { clientUuid: string; line: CartLine; index: number }): CartState {
+  if (cart.clientUuid !== removed.clientUuid) return cart;
+  if (cart.lines.some((l) => l.key === removed.line.key) || cart.lines.length >= MAX_LINES) return cart;
+  const lines = [...cart.lines];
+  lines.splice(Math.min(Math.max(removed.index, 0), lines.length), 0, removed.line);
+  return { ...cart, lines };
+}
+
+/** Change the price charged for a line. Needs `sales.price_override`, except for manual items. */
 export function setUnitPrice(cart: CartState, key: string, unitPricePaise: number, ctx: PosContext): CartResult {
   const line = findLine(cart, key);
   if (!line) return fail("That item is no longer on the bill");
   if (!Number.isInteger(unitPricePaise) || unitPricePaise < 0) return fail("Enter a valid price");
   if (unitPricePaise === line.unitPricePaise) return ok(cart);
+  // A manual item has no list price to protect: the cashier sets it.
+  if (isManualLine(line)) {
+    if (unitPricePaise <= 0) return fail("Enter a price more than zero");
+    return ok(replaceLine(cart, { ...line, unitPricePaise, listPricePaise: unitPricePaise }));
+  }
   if (!ctx.canOverridePrice) return fail("You are not allowed to change prices");
   return ok(replaceLine(cart, { ...line, unitPricePaise }));
 }
@@ -333,6 +402,15 @@ function isBlankCustomer(c: CartCustomer): boolean {
 
 export function setCustomer(cart: CartState, customer: CartCustomer | null): CartState {
   return { ...cart, customer: customer && !isBlankCustomer(customer) ? customer : null };
+}
+
+/**
+ * Put a customer from lookup or quick-add on the bill. A record without an id
+ * (typed in while offline) only prints its details on this bill: no saved customer, so no credit.
+ */
+export function attachCustomerRecord(cart: CartState, record: PosCustomer): CartState {
+  const { id, ...details } = customerFromRecord(record);
+  return setCustomer(cart, id ? { id, ...details } : walkInCustomer(details));
 }
 
 /** Edit fields of the customer on the bill (creates a walk-in snapshot when there is none). */
@@ -487,6 +565,7 @@ export function syncCartWithCatalog(
 ): CartState {
   let changed = false;
   const lines = cart.lines.map((line) => {
+    if (line.productId === null) return line;
     const p = lookup(line.productId);
     if (!p) return line;
     const stock = p.stock === null ? null : new Decimal(p.stock).minus(soldSinceLoad(p.id)).toNumber();

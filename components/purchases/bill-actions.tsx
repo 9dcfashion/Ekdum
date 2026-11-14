@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useAppRouter as useRouter } from "@/lib/use-app-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { Ban, CheckCircle2, IndianRupee, Trash2 } from "lucide-react";
@@ -39,19 +39,19 @@ export function PostBillButton({ billId, outletName }: { billId: string; outletN
     <ConfirmDialog
       trigger={
         <Button>
-          <CheckCircle2 aria-hidden /> Post
+          <CheckCircle2 aria-hidden /> Add to stock
         </Button>
       }
-      title="Post this purchase bill?"
-      description={`Posting adds the items to stock at ${outletName} and locks the bill. To change it afterwards you would have to cancel it and enter it again.`}
-      confirmLabel="Post bill"
+      title="Add to stock?"
+      description={`Stock will go up for these items at ${outletName} and the bill will be locked. To change it afterwards you would have to cancel it and enter it again.`}
+      confirmLabel="Yes, add to stock"
       onConfirm={async () => {
         const result = await callAction(() => postPurchaseBillAction({ id: billId }));
         if (!result.ok) {
           toast.error(result.error);
           return false;
         }
-        toast.success("Purchase bill posted. Stock is updated.");
+        toast.success("Added to stock. The bill is locked.");
         router.refresh();
       }}
     />
@@ -124,7 +124,7 @@ export function CancelBillDialog({ billId, hasPayments }: { billId: string; hasP
             }),
           )}
         >
-          <Field label="Reason" htmlFor="cancel-reason" required error={errors.reason?.message} hint="For example: entered twice, goods returned to vendor">
+          <Field label="Reason" htmlFor="cancel-reason" required error={errors.reason?.message} hint="For example: entered twice, goods returned to the supplier">
             <Textarea id="cancel-reason" rows={2} maxLength={300} autoFocus {...form.register("reason")} />
           </Field>
           <DialogFooter>
@@ -152,7 +152,7 @@ export function RecordPaymentDialog({ billId, outstandingPaise, today }: { billI
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Record a payment to the vendor</DialogTitle>
+          <DialogTitle>Record a payment to the supplier</DialogTitle>
           <DialogDescription>
             Still to pay: <span className="tabular font-medium text-foreground">{formatINR(outstandingPaise)}</span>
           </DialogDescription>

@@ -5,6 +5,7 @@ export interface VendorOption {
   name: string;
   gstin: string | null;
   state_code: string | null;
+  phone?: string | null;
 }
 
 export interface OutletOption {
@@ -36,6 +37,14 @@ export interface PurchaseProductOption {
   cess_rate: number;
   /** Last purchase price per unit before tax. Null when unknown or the user may not see costs. */
   cost_paise: number | null;
+  /** Stock at the bill's outlet. Null when not tracked, unknown, or the user may not see stock. */
+  stock: number | null;
+}
+
+export interface ProductSuggestions {
+  /** "vendor": bought from this supplier before; "recent": bought recently from anyone. */
+  source: "vendor" | "recent";
+  results: PurchaseProductOption[];
 }
 
 export interface ProductSearchResult {

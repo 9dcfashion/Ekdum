@@ -50,7 +50,7 @@ lib/
   money/  dates/          paise helpers, INR formatting, IST dates, financial year
   validation/             Zod schemas shared by forms and Server Actions
   sales/post.ts           the single code path that turns a sale into an invoice
-  providers/              EmailProvider / WhatsAppProvider + mock, Resend, Meta
+  providers/              EmailProvider / WhatsAppProvider + mock, Resend, Meta, Evolution
   notifications/          outbox worker
   pdf/  invoices/         invoice templates and loaders
   offline/                Dexie schema, sync queue
@@ -194,6 +194,9 @@ Series roll over automatically on 1 April (IST). Cancelled bills keep their numb
 | Sale detail | `/app/sales/{id}` | |
 | Product CSV import | `/app/products/import` | |
 | New shipment from invoice | `/app/shipments/new?invoice={id}` | |
+| Photos of items given | `<SalePhotoUploader businessId invoiceId />` (`components/sales/sale-photo-uploader.tsx`), `<SalePhotos ctx invoiceId cancelled />` | table `sales_invoice_photos`, bucket `sale-photos/{business}/{invoice}/…`; add: `sales.create` on a visible posted bill; remove: `sales.cancel` (audited) |
+| Quick billing items | table `quick_items` (managed in `/app/settings/quick-items`, `lib/quick-items/*`; ready-made sets in `lib/quick-items/packs.ts`); loaded into `PosSettings.quickItems` by `app/app/pos/page.tsx` | tapped at the POS → qty + rate → billed through `addManualItem` (no stock) |
+| Manual items (not in product list) | `addManualItem()` in `lib/pos/cart.ts`; line has `product_id = null` | no stock movement; GST rate checked against `gst_rates` on the server |
 
 ## Offline POS
 

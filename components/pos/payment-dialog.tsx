@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { isValidMobile, upiPaymentUri } from "@/lib/gst";
 import { formatINR, paiseToRupees, rupeesToPaise } from "@/lib/money";
 import { cashSettlement, checkPayments, type BuildSaleOptions, type CartSummary } from "@/lib/pos/cart";
-import type { CartState, PaymentEntry, PosSettings } from "@/lib/pos/types";
+import type { CartState, PaymentEntry, PosCustomer, PosSettings } from "@/lib/pos/types";
 import type { PaymentMode } from "@/lib/types/db";
 import { cn } from "@/lib/utils";
 import { Kbd } from "./shortcut-legend";
@@ -32,7 +32,14 @@ export interface PaymentConfirmation {
   /** Email typed in the dialog (saved on the bill when a receipt is requested). */
   email: string;
   changePaise: number;
+  /**
+   * Phone pay screen only: the customer to put on the bill as it is saved.
+   * `record`: a saved customer found by mobile number (or just added). `phone`: the number only, on this bill.
+   */
+  customer?: CustomerChoice;
 }
+
+export type CustomerChoice = { kind: "record"; record: PosCustomer } | { kind: "phone"; phone: string };
 
 export interface PayError {
   code: string;
@@ -41,7 +48,7 @@ export interface PayError {
 
 const blank = (): Record<PaymentMode, string> => ({ cash: "", upi: "", card: "", bank_transfer: "", credit: "" });
 
-function errorHelp(code: string): { hint: string; refresh?: boolean } {
+export function errorHelp(code: string): { hint: string; refresh?: boolean } {
   switch (code) {
     case "totals_mismatch":
       return { hint: "A price or tax rate may have changed since this screen was opened. Refresh the catalog, review the bill and try again.", refresh: true };
@@ -65,8 +72,8 @@ function errorHelp(code: string): { hint: string; refresh?: boolean } {
   }
 }
 
-/** QR for the exact UPI amount. The box has a fixed size, so the dialog never jumps. */
-function UpiQr({ uri }: { uri: string | null }) {
+/** QR for the exact UPI amount. The box has a fixed size, so the dialog never jumps. `large` for the phone pay screen. */
+export function UpiQr({ uri, large = false }: { uri: string | null; large?: boolean }) {
   const [qr, setQr] = useState<{ uri: string; dataUrl: string } | null>(null);
 
   useEffect(() => {
@@ -83,9 +90,9 @@ function UpiQr({ uri }: { uri: string | null }) {
 
   const ready = uri && qr?.uri === uri ? qr.dataUrl : null;
   return (
-    <div className="flex size-40 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-white">
+    <div className={cn("flex shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-white", large ? "size-60" : "size-40")}>
       {ready ? (
-        <Image src={ready} alt="UPI QR code for the exact amount" width={160} height={160} unoptimized />
+        <Image src={ready} alt="UPI QR code for the exact amount" width={large ? 240 : 160} height={large ? 240 : 160} unoptimized />
       ) : (
         <p className="px-3 text-center text-xs text-muted-foreground">{uri ? "Making the QR code…" : "Enter a UPI amount to show the QR code"}</p>
       )}
@@ -418,7 +425,8 @@ export function PaymentDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onClosed: () => void;
+  /** After closing. Return false to let focus go back to the button that opened it (phones). */
+  onClosed: () => boolean | void;
   cart: CartState;
   summary: CartSummary;
   settings: PosSettings;
@@ -433,8 +441,7 @@ export function PaymentDialog({
         showCloseButton={!form.posting}
         className="max-h-[calc(100dvh-1rem)] overflow-y-auto sm:max-w-2xl"
         onCloseAutoFocus={(e) => {
-          e.preventDefault();
-          onClosed();
+          if (onClosed() !== false) e.preventDefault();
         }}
         onInteractOutside={(e) => e.preventDefault()}
       >

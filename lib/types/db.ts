@@ -38,6 +38,10 @@ export interface Business {
   upi_id: string | null;
   invoice_terms: string | null;
   invoice_footer: string | null;
+  /** Line under the shop name on the bill, e.g. "Wholesale Dealer in: Fancy Jewellery". */
+  invoice_tagline: string | null;
+  /** Title printed under "For {shop}", e.g. "Proprietor". */
+  signatory_label: string;
   round_off_enabled: boolean;
   allow_negative_stock: boolean;
   hsn_digits: 4 | 6 | 8;
@@ -392,6 +396,15 @@ export interface CreditNoteItem {
   igst_paise: number;
   cess_paise: number;
   total_paise: number;
+}
+
+export interface SalesInvoicePhoto {
+  id: string;
+  business_id: string;
+  invoice_id: string;
+  storage_path: string;
+  created_by: string | null;
+  created_at: string;
 }
 
 export interface NotificationJob {

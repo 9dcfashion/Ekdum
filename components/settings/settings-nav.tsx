@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
+import { useAppRouter as useRouter } from "@/lib/use-app-router";
 import { NativeSelect } from "@/components/shared/field";
 import { SETTINGS_NAV, activeSettingsHref } from "@/lib/settings/nav";
 import { cn } from "@/lib/utils";

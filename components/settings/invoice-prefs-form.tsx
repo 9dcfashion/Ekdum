@@ -1,8 +1,9 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useState } from "react";
 import { Printer } from "lucide-react";
-import { useForm, useWatch } from "react-hook-form";
+import { Controller, useForm, useWatch } from "react-hook-form";
 import { MiniInvoicePreview } from "@/components/invoice/mini-preview";
 import { Field, NativeSelect } from "@/components/shared/field";
 import { SubmitButton } from "@/components/shared/submit-button";
@@ -10,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { logoUrl } from "@/lib/storage";
 import { useAction } from "@/lib/use-action";
+import { SIGNATORY_TITLES } from "@/lib/validation/onboarding";
 import { invoicePrefsFormSchema, type InvoicePrefsInput } from "@/lib/validation/settings";
 import { saveInvoicePrefsAction } from "@/app/app/(shell)/settings/actions";
 import type { PreviewBusiness } from "./branding-form";
@@ -21,6 +23,7 @@ export interface InvoicePrefs {
   round_off_enabled: boolean;
   invoice_terms: string | null;
   invoice_footer: string | null;
+  signatory_label: string;
   hsn_digits: 4 | 6 | 8;
   bos_for_exempt_only: boolean;
   cancel_window_days: number | null;
@@ -29,6 +32,70 @@ export interface InvoicePrefs {
 }
 
 const RADIO = "mt-0.5 accent-[var(--primary)]";
+
+const OTHER_TITLE = "__other";
+const isPresetTitle = (value: string) => (SIGNATORY_TITLES as readonly string[]).includes(value);
+
+/**
+ * "Signature title" printed under "For {shop}" on bills: the usual titles, plus "Other"
+ * with a text box. Controlled; also used by the onboarding invoice step.
+ */
+export function SignatoryTitleField({
+  value,
+  onChange,
+  onBlur,
+  error,
+  className,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onBlur?: () => void;
+  error?: string;
+  className?: string;
+}) {
+  const [other, setOther] = useState(() => !isPresetTitle(value));
+
+  return (
+    <Field
+      label="Signature title"
+      htmlFor="signatory_label_choice"
+      required
+      error={error}
+      hint="Printed under “For your shop name” where the bill is signed."
+      className={className}
+    >
+      <NativeSelect
+        id="signatory_label_choice"
+        value={other ? OTHER_TITLE : value}
+        onChange={(e) => {
+          const next = e.target.value;
+          setOther(next === OTHER_TITLE);
+          onChange(next === OTHER_TITLE ? "" : next);
+        }}
+        onBlur={onBlur}
+      >
+        {SIGNATORY_TITLES.map((title) => (
+          <option key={title} value={title}>
+            {title}
+          </option>
+        ))}
+        <option value={OTHER_TITLE}>Other</option>
+      </NativeSelect>
+      {other ? (
+        <Input
+          id="signatory_label"
+          aria-label="Your signature title"
+          placeholder="e.g. Owner"
+          maxLength={40}
+          value={value}
+          aria-invalid={!!error}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={onBlur}
+        />
+      ) : null}
+    </Field>
+  );
+}
 
 export function InvoicePrefsForm({
   prefs,
@@ -52,6 +119,7 @@ export function InvoicePrefsForm({
       round_off_enabled: prefs.round_off_enabled,
       invoice_terms: prefs.invoice_terms ?? "",
       invoice_footer: prefs.invoice_footer ?? "",
+      signatory_label: prefs.signatory_label,
       hsn_digits: String(prefs.hsn_digits) as "4" | "6" | "8",
       bos_for_exempt_only: prefs.bos_for_exempt_only,
       cancel_window_mode: prefs.cancel_window_days === null ? "no_limit" : prefs.cancel_window_days === 0 ? "same_day" : "days",
@@ -62,6 +130,7 @@ export function InvoicePrefsForm({
   });
   const { errors } = form.formState;
   const footer = useWatch({ control: form.control, name: "invoice_footer" });
+  const signatory = useWatch({ control: form.control, name: "signatory_label" });
   const cancelMode = useWatch({ control: form.control, name: "cancel_window_mode" });
   const allowNegative = useWatch({ control: form.control, name: "allow_negative_stock" });
 
@@ -126,6 +195,19 @@ export function InvoicePrefsForm({
           <Field label="Footer note" htmlFor="invoice_footer" error={errors.invoice_footer?.message} hint="A short line at the bottom of every bill.">
             <Input id="invoice_footer" maxLength={300} {...form.register("invoice_footer")} />
           </Field>
+          <Controller
+            control={form.control}
+            name="signatory_label"
+            render={({ field, fieldState }) => (
+              <SignatoryTitleField
+                value={field.value ?? ""}
+                onChange={field.onChange}
+                onBlur={field.onBlur}
+                error={fieldState.error?.message}
+                className="max-w-sm"
+              />
+            )}
+          />
 
           <fieldset className="grid gap-2">
             <legend className="mb-1.5 text-sm font-medium">How long can a bill be cancelled?</legend>
@@ -216,6 +298,8 @@ export function InvoicePrefsForm({
               documentType={preview.documentType}
               prefix={preview.prefix}
               footer={footer}
+              tagline={preview.tagline}
+              signatoryLabel={signatory}
             />
           </div>
           <InfoBox>

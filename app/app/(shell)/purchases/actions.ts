@@ -7,10 +7,11 @@ import type { AppContext } from "@/lib/auth/context";
 import { validateGstin } from "@/lib/gst";
 import { ilikeTerm } from "@/lib/list";
 import { PurchaseComputeError, buildPurchasePayload, isEmptyDraft, ourStateCode, postingProblems } from "@/lib/purchases/compute";
-import type { ProductSearchResult, PurchaseProductOption, SaveBillResult, VendorOption } from "@/lib/purchases/types";
+import { rankRecentProducts } from "@/lib/purchases/flow";
+import type { ProductSearchResult, ProductSuggestions, PurchaseProductOption, SaveBillResult, VendorOption } from "@/lib/purchases/types";
 import { BUCKETS } from "@/lib/storage";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { uuid } from "@/lib/validation/common";
+import { uuid, uuidOptional } from "@/lib/validation/common";
 import {
   cancelPurchaseSchema,
   purchaseBillSchema,
@@ -229,7 +230,7 @@ export async function createVendorInlineAction(input: unknown) {
           state_code: fromGstin ?? data.state_code,
           created_by: ctx.user.id,
         })
-        .select("id, name, gstin, state_code")
+        .select("id, name, gstin, state_code, phone")
         .single(),
     ) as VendorOption;
     revalidatePath("/app/vendors");
@@ -260,44 +261,124 @@ export async function createProductInlineAction(input: unknown) {
         })
         .select("id, name, sku, barcode, hsn_code, unit_code, gst_rate, cess_rate")
         .single(),
-    ) as Omit<PurchaseProductOption, "cost_paise">;
+    ) as Omit<PurchaseProductOption, "cost_paise" | "stock">;
     revalidatePath("/app/products");
-    return { ...row, gst_rate: Number(row.gst_rate), cess_rate: Number(row.cess_rate), cost_paise: null };
+    return { ...row, gst_rate: Number(row.gst_rate), cess_rate: Number(row.cess_rate), cost_paise: null, stock: null };
   });
+}
+
+const PRODUCT_COLUMNS = "id, name, sku, barcode, hsn_code, unit_code, gst_rate, cess_rate, track_inventory";
+type ProductRow = Omit<PurchaseProductOption, "cost_paise" | "stock"> & { track_inventory: boolean };
+
+/**
+ * Add the last purchase rate (only for users who may see costs) and the stock at
+ * the bill's outlet (only for users who may see stock there) to product rows.
+ */
+async function withCostAndStock(ctx: AppContext, rows: ProductRow[], outletId: string | null): Promise<PurchaseProductOption[]> {
+  const ids = rows.map((r) => r.id);
+  const outlet = outletId && ctx.outlets.some((o) => o.id === outletId) ? outletId : null;
+  const showStock = !!outlet && ctx.can("inventory.view");
+  const costs = new Map<string, number>();
+  const stock = new Map<string, number>();
+  if (ids.length > 0) {
+    const [costRows, stockRows] = await Promise.all([
+      ctx.can("products.view_cost")
+        ? ctx.supabase.from("product_costs").select("product_id, purchase_price_paise").in("product_id", ids)
+        : Promise.resolve({ data: [] }),
+      showStock
+        ? ctx.supabase.from("stock_levels").select("product_id, quantity").eq("outlet_id", outlet).in("product_id", ids)
+        : Promise.resolve({ data: [] }),
+    ]);
+    for (const c of (costRows.data ?? []) as { product_id: string; purchase_price_paise: number }[]) {
+      costs.set(c.product_id, Number(c.purchase_price_paise));
+    }
+    for (const l of (stockRows.data ?? []) as { product_id: string; quantity: number | string }[]) {
+      stock.set(l.product_id, Number(l.quantity));
+    }
+  }
+  return rows.map(({ track_inventory, ...r }) => ({
+    ...r,
+    gst_rate: Number(r.gst_rate),
+    cess_rate: Number(r.cess_rate),
+    cost_paise: costs.get(r.id) ?? null,
+    stock: showStock && track_inventory ? (stock.get(r.id) ?? 0) : null,
+  }));
 }
 
 /** Product search for the line picker: name, SKU or barcode. A scanned barcode comes back as `exactId`. */
 export async function searchPurchaseProductsAction(input: unknown) {
-  return runAction(z.object({ q: z.string().trim().max(100) }), input, { perm: "purchases.create" }, async ({ q }, ctx): Promise<ProductSearchResult> => {
-    const term = ilikeTerm(q);
-    if (!term) return { results: [], exactId: null };
-    const columns = "id, name, sku, barcode, hsn_code, unit_code, gst_rate, cess_rate";
-    const base = () => ctx.supabase.from("products").select(columns).eq("business_id", ctx.business.id).eq("is_active", true);
-    // Inside or=(...) a quoted value is taken literally; quotes and backslashes are stripped first.
-    const exactValue = q.replace(/["\\]/g, " ").trim();
-    const [exact, fuzzy] = await Promise.all([
-      exactValue ? base().or(`barcode.eq."${exactValue}",sku.eq."${exactValue}"`).limit(2) : Promise.resolve({ data: [], error: null }),
-      base().or(`name.ilike.%${term}%,sku.ilike.%${term}%,barcode.ilike.%${term}%`).order("name").limit(12),
-    ]);
-    type Row = Omit<PurchaseProductOption, "cost_paise">;
-    const exactRows = ((exact.error ? [] : exact.data) ?? []) as Row[];
-    const fuzzyRows = (unwrap(fuzzy) ?? []) as Row[];
-    const seen = new Set<string>();
-    const rows = [...exactRows, ...fuzzyRows].filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+  return runAction(
+    z.object({ q: z.string().trim().max(100), outlet_id: uuidOptional }),
+    input,
+    { perm: "purchases.create" },
+    async ({ q, outlet_id }, ctx): Promise<ProductSearchResult> => {
+      const term = ilikeTerm(q);
+      if (!term) return { results: [], exactId: null };
+      const base = () => ctx.supabase.from("products").select(PRODUCT_COLUMNS).eq("business_id", ctx.business.id).eq("is_active", true);
+      // Inside or=(...) a quoted value is taken literally; quotes and backslashes are stripped first.
+      const exactValue = q.replace(/["\\]/g, " ").trim();
+      const [exact, fuzzy] = await Promise.all([
+        exactValue ? base().or(`barcode.eq."${exactValue}",sku.eq."${exactValue}"`).limit(2) : Promise.resolve({ data: [], error: null }),
+        base().or(`name.ilike.%${term}%,sku.ilike.%${term}%,barcode.ilike.%${term}%`).order("name").limit(12),
+      ]);
+      const exactRows = ((exact.error ? [] : exact.data) ?? []) as ProductRow[];
+      const fuzzyRows = (unwrap(fuzzy) ?? []) as ProductRow[];
+      const seen = new Set<string>();
+      const rows = [...exactRows, ...fuzzyRows].filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+      return {
+        results: await withCostAndStock(ctx, rows, outlet_id),
+        exactId: exactRows.length === 1 ? exactRows[0].id : null,
+      };
+    },
+  );
+}
 
-    const costs = new Map<string, number>();
-    if (rows.length > 0 && ctx.can("products.view_cost")) {
-      const { data } = await ctx.supabase
-        .from("product_costs")
-        .select("product_id, purchase_price_paise")
-        .in("product_id", rows.map((r) => r.id));
-      for (const c of (data ?? []) as { product_id: string; purchase_price_paise: number }[]) {
-        costs.set(c.product_id, Number(c.purchase_price_paise));
-      }
-    }
-    return {
-      results: rows.map((r) => ({ ...r, gst_rate: Number(r.gst_rate), cess_rate: Number(r.cess_rate), cost_paise: costs.get(r.id) ?? null })),
-      exactId: exactRows.length === 1 ? exactRows[0].id : null,
-    };
-  });
+/**
+ * What to show before anything is typed in the item search: products bought
+ * from this supplier on their latest bills, else products bought recently from anyone.
+ */
+export async function suggestPurchaseProductsAction(input: unknown) {
+  return runAction(
+    z.object({ vendor_id: uuidOptional, outlet_id: uuidOptional }),
+    input,
+    { perm: "purchases.create" },
+    async ({ vendor_id, outlet_id }, ctx): Promise<ProductSuggestions> => {
+      const latestBills = async (vendorId: string | null) => {
+        let query = ctx.supabase
+          .from("purchase_bills")
+          .select("id")
+          .eq("business_id", ctx.business.id)
+          .neq("status", "cancelled")
+          .order("created_at", { ascending: false })
+          .limit(vendorId ? 8 : 15);
+        if (vendorId) query = query.eq("vendor_id", vendorId);
+        const { data } = await query;
+        return ((data ?? []) as { id: string }[]).map((b) => b.id);
+      };
+      let source: ProductSuggestions["source"] = "recent";
+      let billIds = vendor_id ? await latestBills(vendor_id) : [];
+      if (billIds.length > 0) source = "vendor";
+      else billIds = await latestBills(null);
+      if (billIds.length === 0) return { source, results: [] };
+
+      const { data: items } = await ctx.supabase
+        .from("purchase_bill_items")
+        .select("purchase_bill_id, product_id, line_no")
+        .in("purchase_bill_id", billIds)
+        .not("product_id", "is", null)
+        .limit(400);
+      const ids = rankRecentProducts(billIds, (items ?? []) as { purchase_bill_id: string; product_id: string | null; line_no: number }[], 12);
+      if (ids.length === 0) return { source, results: [] };
+
+      const { data: products } = await ctx.supabase
+        .from("products")
+        .select(PRODUCT_COLUMNS)
+        .eq("business_id", ctx.business.id)
+        .eq("is_active", true)
+        .in("id", ids);
+      const byId = new Map(((products ?? []) as ProductRow[]).map((p) => [p.id, p]));
+      const rows = ids.map((id) => byId.get(id)).filter((p): p is ProductRow => !!p);
+      return { source, results: await withCostAndStock(ctx, rows, outlet_id) };
+    },
+  );
 }

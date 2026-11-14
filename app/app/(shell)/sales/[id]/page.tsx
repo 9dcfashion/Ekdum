@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Ban } from "lucide-react";
 import { z } from "zod";
 import { DeliveryStatus } from "@/components/invoice/delivery-status";
+import { SalePhotos } from "@/components/sales/sale-photos";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -223,7 +224,14 @@ export default async function SaleDetailPage({ params }: { params: Promise<{ id:
               {items.map((item) => (
                 <TableRow key={item.id}>
                   <TableCell className="tabular text-muted-foreground">{item.line_no}</TableCell>
-                  <TableCell className="min-w-40">{item.description}</TableCell>
+                  <TableCell className="min-w-40">
+                    {item.description}
+                    {item.product_id === null ? (
+                      <span className="ml-2 inline-block align-middle">
+                        <StatusBadge tone="indigo" label="Not in product list" />
+                      </span>
+                    ) : null}
+                  </TableCell>
                   <TableCell className="tabular">{displayHsn(item.hsn_code, business.hsn_digits) || "-"}</TableCell>
                   <TableCell className="tabular text-right whitespace-nowrap">
                     {formatQty(item.quantity)} <span className="text-xs text-muted-foreground">{item.unit_code}</span>
@@ -378,6 +386,10 @@ export default async function SaleDetailPage({ params }: { params: Promise<{ id:
           </dl>
           <p className="mt-3 text-sm text-muted-foreground">{invoice.amount_in_words}</p>
         </section>
+      </div>
+
+      <div className="mt-4">
+        <SalePhotos ctx={ctx} invoiceId={invoice.id} cancelled={cancelled} />
       </div>
 
       <div className="mt-4">

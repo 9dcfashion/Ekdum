@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useAppRouter as useRouter } from "@/lib/use-app-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Controller, useForm, useWatch, type Control } from "react-hook-form";
 import { Plus } from "lucide-react";

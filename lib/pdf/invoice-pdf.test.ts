@@ -1,10 +1,14 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { inflateSync } from "node:zlib";
+import { createElement } from "react";
+import { renderToBuffer } from "@react-pdf/renderer";
 import { describe, expect, it } from "vitest";
-import { fixtureBundle, fixtureItem } from "@/lib/invoices/fixtures";
+import { fixtureBundle, fixtureItem, referenceBundle } from "@/lib/invoices/fixtures";
+import { qrDataUrl } from "@/lib/invoices/qr";
 import { buildInvoiceView } from "@/lib/invoices/view";
 import { invoicePdfFilename, pdfMoney, pdfSafeDeep, pdfSigned, pdfText } from "./format";
-import { invoiceColumns } from "./invoice-document";
+import { InvoiceDocument, invoiceColumns } from "./invoice-document";
 import { detectPdfImageFormat, renderInvoicePdf } from "./render";
 
 /** Set PDF_TEST_OUTPUT_DIR to keep the rendered files for a visual check. */
@@ -18,6 +22,31 @@ function keep(name: string, pdf: Buffer) {
 function pageCount(pdf: Buffer): number {
   return (pdf.toString("latin1").match(/\/Type\s*\/Page\b/g) ?? []).length;
 }
+
+/**
+ * The text drawn in the PDF, one string per text run. The built-in fonts write runs as
+ * `[<hex> kerning <hex> ...] TJ` inside deflated content streams.
+ */
+function drawnText(pdf: Buffer): string[] {
+  const raw = pdf.toString("latin1");
+  const runs: string[] = [];
+  for (const match of raw.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
+    let content: string;
+    try {
+      content = inflateSync(Buffer.from(match[1], "latin1")).toString("latin1");
+    } catch {
+      continue;
+    }
+    for (const op of content.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+      const hex = [...op[1].matchAll(/<([0-9a-fA-F]*)>/g)].map((m) => m[1]).join("");
+      runs.push(Buffer.from(hex, "hex").toString("latin1"));
+    }
+  }
+  return runs;
+}
+
+/** All drawn text as one string, runs joined with single spaces (a cell's text can be split into runs). */
+const joinedText = (pdf: Buffer) => drawnText(pdf).join(" ").replace(/\s+/g, " ");
 
 describe("renderInvoicePdf", () => {
   it("renders a 40-line tax invoice across several pages", async () => {
@@ -65,19 +94,116 @@ describe("renderInvoicePdf", () => {
   });
 });
 
+describe("the shopkeeper's boxed layout", () => {
+  it("draws the reference bill on one page, cell for cell", async () => {
+    const pdf = await renderInvoicePdf(referenceBundle());
+    keep("reference-dc-fashion.pdf", pdf);
+    expect(pageCount(pdf)).toBe(1);
+    const text = joinedText(pdf);
+    for (const expected of [
+      "D C FASHION JEWELLERY",
+      "Wholesale Dealer in: Stone Settled Exclusive Fancy Jewellery",
+      "TAX INVOICE",
+      "Original for Recipient",
+      "Details of Buyer : Agrawal Gems",
+      "GSTIN : 27ACAPV1182E1ZP",
+      "Place of Supply: Maharashtra (27)",
+      "Sr.No",
+      "Description of Goods",
+      "HSN Code",
+      "50,000.00",
+      "Total Taxable Amount",
+      "90,000.00",
+      "Add SGST",
+      "Add IGST",
+      "1.5%",
+      "Total Amount",
+      "92,700.00",
+      "For D C FASHION JEWELLERY",
+      "Proprietor",
+    ]) {
+      expect(text, expected).toContain(expected);
+    }
+    expect(text).toContain("A/C NO. 2512384715 / IFSC: KKBK0001347");
+    expect(text).not.toMatch(/Page \d/);
+    expect(text).not.toContain("GST %");
+    expect(text).not.toContain("Disc.");
+  });
+
+  it("embeds the logo and the UPI QR in their boxes", async () => {
+    const view = buildInvoiceView(referenceBundle({ business: { upi_id: "dcfashion@okhdfcbank" } }));
+    const logo = { data: readFileSync(path.join(process.cwd(), "public/icons/icon-192.png")), format: "png" as const };
+    const upiQr = await qrDataUrl(view.upi!.uri);
+    const element = createElement(InvoiceDocument, { view: pdfSafeDeep(view), logo, upiQr });
+    const pdf = await renderToBuffer(element as unknown as Parameters<typeof renderToBuffer>[0]);
+    keep("reference-logo-upi.pdf", pdf);
+    expect(pageCount(pdf)).toBe(1);
+    expect((pdf.toString("latin1").match(/\/Subtype\s*\/Image/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // The UPI ID sits under the QR, split before the "@".
+    expect(joinedText(pdf)).toMatch(/dcfashion @ ?okhdfcbank/);
+  });
+
+  it("adds GST % and Disc. columns only when the bill needs them", async () => {
+    const pdf = await renderInvoicePdf(
+      fixtureBundle({
+        items: [
+          fixtureItem(1, "intra", { discount_paise: 11800, taxable_paise: 90000, cgst_paise: 8100, sgst_paise: 8100, total_paise: 106200 }),
+          fixtureItem(2, "intra", {
+            description: "Cooking oil 1L",
+            gst_rate: 5,
+            unit_code: "LTR",
+            quantity: 3,
+            unit_price_paise: 15750,
+            taxable_paise: 45000,
+            cgst_paise: 1125,
+            sgst_paise: 1125,
+            total_paise: 47250,
+          }),
+        ],
+        invoice: { round_off_paise: 50, amount_due_paise: 50000, notes: "Deliver to the back gate" },
+      }),
+    );
+    keep("tax-invoice-multi-rate.pdf", pdf);
+    const text = joinedText(pdf);
+    for (const expected of ["GST %", "Disc.", "2 PCS", "3 LTR", "Round Off +0.50", "Balance Due 500.00", "Note: Deliver"]) {
+      expect(text, expected).toContain(expected);
+    }
+    expect(drawnText(pdf).filter((t) => t === "Add SGST")).toHaveLength(2);
+    expect(text).not.toContain("Add IGST");
+    expect(text).toContain("Authorised Signatory");
+  });
+
+  it("prints no GSTIN, HSN or tax rows on a cash memo", async () => {
+    const pdf = await renderInvoicePdf(fixtureBundle({ documentType: "cash_memo", business: { upi_id: null } }));
+    const text = joinedText(pdf);
+    expect(text).toContain("CASH MEMO");
+    expect(text).toContain("Bill No: A/2627/00042");
+    expect(text).not.toMatch(/GSTIN|HSN|SGST|CGST|IGST|Place of Supply/);
+  });
+
+  it("repeats the item header and numbers the pages of a long bill", async () => {
+    const pdf = await renderInvoicePdf(fixtureBundle({ lineCount: 40 }));
+    const pages = pageCount(pdf);
+    expect(pages).toBeGreaterThanOrEqual(2);
+    const text = drawnText(pdf);
+    expect(text.filter((t) => t === "Sr.No")).toHaveLength(pages);
+    expect(joinedText(pdf)).toContain(`Page ${pages} of ${pages}`);
+    // The totals travel with the last line.
+    expect(text.lastIndexOf("Basmati Rice 5kg pack 40")).toBeGreaterThan(text.lastIndexOf("Sr.No"));
+  });
+});
+
 describe("invoice columns", () => {
   const keys = (options: Parameters<typeof fixtureBundle>[0]) =>
     invoiceColumns(buildInvoiceView(fixtureBundle(options))).map((c) => c.key);
 
-  it("prints CGST and SGST for an intra-state tax invoice", () => {
-    expect(keys({})).toEqual(["no", "description", "hsn", "qty", "unit", "rate", "discount", "taxable", "gst", "cgst", "sgst", "total"]);
+  it("prints the six columns of the shop's sheet on a tax invoice, intra- or inter-state", () => {
+    expect(keys({})).toEqual(["sr", "description", "hsn", "qty", "rate", "amount"]);
+    expect(keys({ interState: true })).toEqual(["sr", "description", "hsn", "qty", "rate", "amount"]);
   });
-  it("prints IGST for an inter-state tax invoice", () => {
-    expect(keys({ interState: true })).toEqual(["no", "description", "hsn", "qty", "unit", "rate", "discount", "taxable", "gst", "igst", "total"]);
-  });
-  it("prints no tax columns on a bill of supply and no HSN on a cash memo", () => {
-    expect(keys({ documentType: "bill_of_supply" })).toEqual(["no", "description", "hsn", "qty", "unit", "rate", "discount", "total"]);
-    expect(keys({ documentType: "cash_memo" })).toEqual(["no", "description", "qty", "unit", "rate", "discount", "total"]);
+  it("keeps HSN on a bill of supply and drops it on a cash memo", () => {
+    expect(keys({ documentType: "bill_of_supply" })).toEqual(["sr", "description", "hsn", "qty", "rate", "amount"]);
+    expect(keys({ documentType: "cash_memo" })).toEqual(["sr", "description", "qty", "rate", "amount"]);
   });
 });
 

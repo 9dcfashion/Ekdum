@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { MiniInvoicePreview } from "@/components/invoice/mini-preview";
 import { Field } from "@/components/shared/field";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { resolveDocumentType } from "@/lib/gst";
 import { cropToSquare } from "@/lib/images";
 import { BUCKETS, UPLOAD_LIMITS, logoUrl as publicLogoUrl, storagePath } from "@/lib/storage";
@@ -26,6 +27,7 @@ export function BrandingStep({ data }: { data: WizardData }) {
   const [color, setColor] = useState(business.brand_color);
   const [logoPath, setLogoPath] = useState<string | null>(business.logo_path);
   const [uploading, setUploading] = useState(false);
+  const [tagline, setTagline] = useState(business.invoice_tagline ?? "");
 
   async function onFile(file: File | undefined) {
     if (!file) return;
@@ -59,7 +61,9 @@ export function BrandingStep({ data }: { data: WizardData }) {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        run(() => saveBrandingAction({ logo_path: logoPath, brand_color: color }), { onSuccess: () => goTo(3) });
+        run(() => saveBrandingAction({ logo_path: logoPath, brand_color: color, invoice_tagline: tagline }), {
+          onSuccess: () => goTo(3),
+        });
       }}
     >
       <div className="grid gap-8 lg:grid-cols-2">
@@ -125,6 +129,20 @@ export function BrandingStep({ data }: { data: WizardData }) {
               </label>
             </div>
           </Field>
+
+          <Field
+            label="Line under your shop name"
+            htmlFor="invoice_tagline"
+            hint="Optional. What you deal in, printed under the shop name on your bills."
+          >
+            <Input
+              id="invoice_tagline"
+              maxLength={120}
+              placeholder="e.g. Wholesale Dealer in: Fancy Jewellery"
+              value={tagline}
+              onChange={(e) => setTagline(e.target.value)}
+            />
+          </Field>
         </div>
 
         <div>
@@ -138,6 +156,8 @@ export function BrandingStep({ data }: { data: WizardData }) {
             brandColor={color}
             documentType={resolveDocumentType({ scheme: business.gst_scheme, lineGstRates: [18], bosForExemptOnly: true })}
             footer={business.invoice_footer}
+            tagline={tagline}
+            signatoryLabel={business.signatory_label}
           />
         </div>
       </div>

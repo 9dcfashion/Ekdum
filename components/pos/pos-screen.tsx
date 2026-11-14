@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { ChevronUp, Loader2, PauseCircle, RefreshCw, ReceiptText, Trash2 } from "lucide-react";
+import { Loader2, PackagePlus, PauseCircle, RefreshCw, ReceiptText, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -13,10 +13,12 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { normaliseMobile } from "@/lib/gst";
 import { Decimal, formatINR } from "@/lib/money";
 import {
+  addManualItem,
   addProduct,
+  attachCustomerRecord,
   buildSaleInput,
   cartIssues,
   changeQuantity,
@@ -25,6 +27,7 @@ import {
   hasUnsavedWork,
   patchCustomer,
   removeLine,
+  restoreLine,
   setBillDiscount,
   setLineDiscount,
   setQuantity,
@@ -33,32 +36,47 @@ import {
   syncCartWithCatalog,
 } from "@/lib/pos/cart";
 import { toParkedBill } from "@/lib/pos/parked";
+import { matchScannedCode, parseRecent, pushRecent, recentStorageKey } from "@/lib/pos/quick-bill";
 import { buildCatalogIndex } from "@/lib/pos/search";
 import type {
   CartResult,
   CartState,
   CatalogProduct,
   Discount,
+  ManualItemInput,
   ParkedBill,
   PosContext,
   PosServices,
   PosSettings,
   PostedBill,
+  QuickItem,
   SubmitSaleResult,
 } from "@/lib/pos/types";
 import { newClientUuid } from "@/lib/pos/uuid";
-import { cn } from "@/lib/utils";
+import { BillSheet, type BillSheetHandlers } from "./bill-sheet";
 import { BillSummary } from "./bill-summary";
+import { CameraScanner, type ScanOutcome } from "./camera-scanner";
 import { CartLines, lineElementId, type CartLineHandlers } from "./cart-lines";
 import { CustomerDialog } from "./customer-dialog";
 import { DiscountDialog } from "./discount-dialog";
+import { ManualItemDialog } from "./manual-item-dialog";
 import { ParkedDialog } from "./parked-dialog";
-import { PaymentDialog, type PayError, type PaymentConfirmation } from "./payment-dialog";
+import { PaymentDialog, type CustomerChoice, type PayError, type PaymentConfirmation } from "./payment-dialog";
 import { ProductSearch } from "./product-search";
+import { QuickBill } from "./quick-bill";
+import { QuickItemDialog } from "./quick-item-dialog";
+import { QuickPaySheet } from "./quick-pay-sheet";
 import { Kbd } from "./shortcut-legend";
 import { SuccessDialog } from "./success-dialog";
+import { isDesktopNow, readStored, useIsDesktop, useStoredValue, writeStored } from "./use-quick-bill";
 
-type DialogName = "customer" | "discount" | "pay" | "parked" | "clear" | null;
+type DialogName = "customer" | "discount" | "pay" | "parked" | "clear" | "manual" | null;
+
+/** Put the customer chosen on the phone pay screen on the bill. */
+function applyCustomerChoice(cart: CartState, choice: CustomerChoice | undefined): CartState {
+  if (!choice) return cart;
+  return choice.kind === "record" ? attachCustomerRecord(cart, choice.record) : patchCustomer(cart, { phone: choice.phone });
+}
 
 const isTypingTarget = (el: EventTarget | null) =>
   el instanceof HTMLElement && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
@@ -71,6 +89,10 @@ const overlayIsOpen = () => document.querySelector('[role="dialog"], [role="aler
  * context and a set of services (post a sale, find customers, hold bills).
  * The online POS passes Server Actions and localStorage; the offline POS can
  * pass Dexie-backed services to the very same component.
+ *
+ * Two layouts share all of the state and rules below: at `lg` and up the
+ * keyboard-first desktop screen (search, bill lines, totals column, dialogs);
+ * below it the phone "quick bill" flow (tiles, bill sheet, pay sheet).
  */
 export function PosScreen({
   catalog,
@@ -91,6 +113,7 @@ export function PosScreen({
   refreshing?: boolean;
 }) {
   const searchRef = useRef<HTMLInputElement>(null);
+  const mobileSearchRef = useRef<HTMLInputElement>(null);
   const postingRef = useRef(false);
 
   // One client_uuid per bill: created with the cart, reused on every retry, replaced only after success or clear.
@@ -98,11 +121,16 @@ export function PosScreen({
   const [sold, setSold] = useState<{ version: string; qty: Record<string, number> }>({ version: catalogVersion, qty: {} });
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogName>(null);
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  // Phone flow. Kept apart from `dialog` so the customer or discount dialog can open on top of these sheets.
+  const [billOpen, setBillOpen] = useState(false);
+  const [quickPayOpen, setQuickPayOpen] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
+  const [quickItem, setQuickItem] = useState<QuickItem | null>(null);
   const [posting, setPosting] = useState(false);
   const [payError, setPayError] = useState<PayError | null>(null);
   const [posted, setPosted] = useState<PostedBill | null>(null);
   const [parkedCount, setParkedCount] = useState(0);
+  const [manualName, setManualName] = useState("");
 
   // ── Derived state ─────────────────────────────────────────────────────────
   const index = buildCatalogIndex(catalog);
@@ -115,8 +143,23 @@ export function PosScreen({
   const issues = cartIssues(cart, ctx, summary);
   const total = summary.totals.totalPaise;
   const dirty = hasUnsavedWork(cart);
+  const isDesktop = useIsDesktop();
+  const recentKey = recentStorageKey(settings.businessId, ctx.outletId);
+  const recentRaw = useStoredValue(recentKey);
+  const recentIds = parseRecent(recentRaw);
+  // Only for a catalog that really came from the server: the offline shell starts empty while the saved one loads.
+  const nothingToSell = catalogVersion !== "" && catalog.length === 0 && settings.quickItems.length === 0;
 
   const focusSearch = () => searchRef.current?.focus();
+  /**
+   * After a dialog closes. Desktop: back to the search box, ready for the next scan.
+   * Phone: false, so focus goes back to the button that opened it (focusing the
+   * search box there would pop the keyboard over the screen).
+   */
+  const afterDialog = () => {
+    if (!isDesktopNow()) return false;
+    focusSearch();
+  };
 
   function apply(result: CartResult): boolean {
     if (!result.ok) {
@@ -134,13 +177,43 @@ export function PosScreen({
   }
 
   // ── Cart actions ──────────────────────────────────────────────────────────
+  /** Add one of a product. Returns why it could not be added, or null. */
+  function tryAddProduct(product: CatalogProduct): string | null {
+    const result = addProduct(cart, { ...product, stock: stockOf(product) }, ctx);
+    if (!result.ok) return result.error;
+    setRawCart(result.cart);
+    setSelectedKey(product.id);
+    requestAnimationFrame(() => document.getElementById(lineElementId(product.id))?.scrollIntoView({ block: "nearest" }));
+    return null;
+  }
+
   function addToCart(product: CatalogProduct): boolean {
-    const added = apply(addProduct(cart, { ...product, stock: stockOf(product) }, ctx));
-    if (added) {
-      setSelectedKey(product.id);
-      requestAnimationFrame(() => document.getElementById(lineElementId(product.id))?.scrollIntoView({ block: "nearest" }));
-    }
-    return added;
+    const error = tryAddProduct(product);
+    if (error) toast.error(error);
+    return error === null;
+  }
+
+  /** A code read by the phone camera: same rules as a scanner (barcode, then SKU), never a guess. */
+  function addScanned(code: string): ScanOutcome {
+    const product = matchScannedCode(index, code);
+    if (!product) return { ok: false, message: `No item has the code ${code}. Try again, or close this and search by name.` };
+    const error = tryAddProduct(product);
+    return error ? { ok: false, message: error } : { ok: true, message: `${product.name} added to the bill.` };
+  }
+
+  /** An item that is not in the product list. Returns an error message, or null when it was added. */
+  function addManual(input: ManualItemInput): string | null {
+    const result = addManualItem(cart, input, ctx);
+    if (!result.ok) return result.error;
+    setRawCart(result.cart);
+    setSelectedKey(input.key);
+    requestAnimationFrame(() => document.getElementById(lineElementId(input.key))?.scrollIntoView({ block: "nearest" }));
+    return null;
+  }
+
+  function openManual(name = "") {
+    setManualName(name.trim());
+    setDialog("manual");
   }
 
   function adjustSelected(delta: number) {
@@ -164,6 +237,29 @@ export function PosScreen({
     focusSearch,
   };
 
+  /** Phone: remove at once and offer Undo, instead of asking "are you sure?". */
+  function removeWithUndo(key: string) {
+    const position = cart.lines.findIndex((l) => l.key === key);
+    if (position < 0) return;
+    const line = cart.lines[position];
+    const clientUuid = cart.clientUuid;
+    setRawCart(removeLine(cart, key));
+    if (selectedKey === key) setSelectedKey(null);
+    toast(`Removed ${line.name}`, {
+      duration: 6000,
+      action: { label: "Undo", onClick: () => setRawCart((current) => restoreLine(current, { clientUuid, line, index: position })) },
+    });
+  }
+
+  const billSheetHandlers: BillSheetHandlers = {
+    onChangeQuantity: lineHandlers.onChangeQuantity,
+    onSetQuantity: lineHandlers.onSetQuantity,
+    onSetPrice: lineHandlers.onSetPrice,
+    onSetDiscount: lineHandlers.onSetDiscount,
+    onRemove: removeWithUndo,
+    onInvalid: lineHandlers.onInvalid,
+  };
+
   function applyBillDiscount(discount: Discount): string | null {
     const result = setBillDiscount(cart, discount, ctx);
     if (!result.ok) return result.error;
@@ -180,18 +276,32 @@ export function PosScreen({
 
   function openPay() {
     if (postingRef.current) return;
+    const desktop = isDesktopNow();
     if (issues.length > 0) {
       toast.error(issues[0].message);
       if (issues[0].code === "b2b_customer" || issues[0].code === "override_reason") setDialog("customer");
+      else if (!desktop && issues[0].lineKey) setBillOpen(true); // show the item with the problem
       return;
     }
-    setDetailsOpen(false);
+    if (desktop) {
+      setDialog("pay");
+    } else {
+      // The bill sheet (if open) stays underneath, so Back on the pay screen returns to it.
+      setQuickPayOpen(true);
+    }
+  }
+
+  /** Phone pay screen → the full payment dialog, for splitting across modes. */
+  function openSplit(choice: CustomerChoice | undefined) {
+    const next = applyCustomerChoice(cart, choice);
+    if (next !== cart) setRawCart(next);
+    setQuickPayOpen(false);
     setDialog("pay");
   }
 
   function requestClear() {
     if (dirty) setDialog("clear");
-    else focusSearch();
+    else if (isDesktopNow()) focusSearch();
   }
 
   // ── Held bills ────────────────────────────────────────────────────────────
@@ -211,9 +321,10 @@ export function PosScreen({
       return void toast.error(error instanceof Error ? error.message : "Could not hold the bill");
     }
     startNewBill();
+    setBillOpen(false);
     toast.success("Bill held. Find it under Held bills.");
     void refreshParkedCount();
-    focusSearch();
+    if (isDesktopNow()) focusSearch();
   }
 
   async function resumeBill(bill: ParkedBill) {
@@ -233,7 +344,8 @@ export function PosScreen({
   async function confirmPayment(confirmation: PaymentConfirmation) {
     // The ref (not state) is the guard: a double click or key repeat arrives before React re-renders.
     if (postingRef.current) return;
-    const billCart = confirmation.email ? patchCustomer(cart, { email: confirmation.email }) : cart;
+    const withCustomer = applyCustomerChoice(cart, confirmation.customer);
+    const billCart = confirmation.email ? patchCustomer(withCustomer, { email: confirmation.email }) : withCustomer;
     const built = buildSaleInput(billCart, ctx, confirmation.payments, confirmation.options);
     if (!built.ok) return setPayError({ code: "invalid", message: built.error });
 
@@ -259,7 +371,7 @@ export function PosScreen({
 
     const qty = { ...soldQty };
     for (const line of billCart.lines) {
-      if (line.trackInventory) qty[line.productId] = new Decimal(qty[line.productId] ?? 0).plus(line.quantity).toNumber();
+      if (line.trackInventory && line.productId) qty[line.productId] = new Decimal(qty[line.productId] ?? 0).plus(line.quantity).toNumber();
     }
     setSold({ version: catalogVersion, qty });
     setPosted({
@@ -274,23 +386,30 @@ export function PosScreen({
       emailQueued: !!built.input.notify?.email && !result.duplicate,
       whatsappQueued: !!built.input.notify?.whatsapp && !result.duplicate,
       customerEmail: billCart.customer?.email ?? "",
+      customerPhone: normaliseMobile(billCart.customer?.phone) ?? "",
       changePaise: confirmation.changePaise,
     });
     setDialog(null);
+    setQuickPayOpen(false);
+    setBillOpen(false);
     startNewBill();
+    // "Recent" tiles on the phone screen: what this device billed last comes first.
+    writeStored(recentKey, JSON.stringify(pushRecent(parseRecent(readStored(recentKey)), billCart.lines.map((l) => l.productId).reverse())));
   }
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
   const onShortcut = useEffectEvent((e: KeyboardEvent) => {
-    const fKey = e.key === "F2" || e.key === "F4" || e.key === "F8" || e.key === "F9";
+    const fKey = e.key === "F2" || e.key === "F4" || e.key === "F6" || e.key === "F8" || e.key === "F9";
     if (fKey) {
       // Always stop the browser's own F-key actions on this screen.
       e.preventDefault();
       if (e.repeat || overlayIsOpen()) return;
       if (e.key === "F2") {
-        focusSearch();
-        searchRef.current?.select();
+        const input = isDesktopNow() ? searchRef.current : mobileSearchRef.current;
+        input?.focus();
+        input?.select();
       } else if (e.key === "F4") setDialog("customer");
+      else if (e.key === "F6") openManual();
       else if (e.key === "F8") openDiscount();
       else openPay();
       return;
@@ -298,7 +417,7 @@ export function PosScreen({
     if (e.key === "Escape") {
       // Open dialogs, the search box and cart fields handle their own Esc first.
       if (e.defaultPrevented || overlayIsOpen()) return;
-      if (isTypingTarget(e.target) && e.target !== searchRef.current) return;
+      if (isTypingTarget(e.target) && e.target !== searchRef.current && e.target !== mobileSearchRef.current) return;
       e.preventDefault();
       requestClear();
     }
@@ -353,22 +472,16 @@ export function PosScreen({
       summary={summary}
       ctx={ctx}
       issues={issues}
-      onOpenCustomer={() => {
-        setDetailsOpen(false);
-        setDialog("customer");
-      }}
+      onOpenCustomer={() => setDialog("customer")}
       onSupplyType={(value) => setRawCart(setSupplyType(cart, value))}
-      onOpenDiscount={() => {
-        setDetailsOpen(false);
-        openDiscount();
-      }}
+      onOpenDiscount={openDiscount}
     />
   );
 
   return (
     <div className="flex h-full flex-col lg:flex-row">
-      {/* Left: search + bill lines. Fixed header and footer; only the lines scroll. */}
-      <section aria-label="Bill" className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Desktop (lg and up), left: search + bill lines. Fixed header and footer; only the lines scroll. */}
+      <section aria-label="Bill" className="hidden min-h-0 min-w-0 flex-1 flex-col lg:flex">
         <div className="shrink-0 border-b bg-background p-2 sm:p-3">
           <ProductSearch
             index={index}
@@ -380,12 +493,34 @@ export function PosScreen({
               if (key) document.getElementById(lineElementId(key))?.focus();
             }}
             onAdjustSelected={adjustSelected}
+            onAddManual={openManual}
           />
+          {settings.quickItems.length > 0 ? (
+            <div className="mt-2 flex items-center gap-1.5 overflow-x-auto" role="group" aria-label="Quick items">
+              <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-muted-foreground">
+                <Zap className="size-3.5" aria-hidden /> Quick
+              </span>
+              {settings.quickItems.map((item) => (
+                <Button key={item.id} type="button" variant="outline" size="sm" className="shrink-0" onClick={() => setQuickItem(item)}>
+                  {item.name}
+                </Button>
+              ))}
+            </div>
+          ) : null}
         </div>
 
-        <CartLines cart={cart} ctx={ctx} selectedKey={selectedKey} handlers={lineHandlers} />
+        <CartLines
+          cart={cart}
+          ctx={ctx}
+          selectedKey={selectedKey}
+          handlers={lineHandlers}
+          nothingToSell={nothingToSell}
+        />
 
         <div className="flex h-12 shrink-0 items-center gap-2 overflow-x-auto border-t bg-background px-2 sm:px-3">
+          <Button type="button" variant="outline" onClick={() => openManual()} aria-keyshortcuts="F6" title="Bill something that is not in your product list">
+            <PackagePlus aria-hidden /> Not in list <Kbd>F6</Kbd>
+          </Button>
           <Button type="button" variant="outline" onClick={() => void holdBill()} disabled={cart.lines.length === 0}>
             <PauseCircle aria-hidden /> Hold
           </Button>
@@ -413,45 +548,88 @@ export function PosScreen({
         </div>
       </section>
 
-      {/* Right: customer, totals and Pay. A fixed-width column on desktop. */}
+      {/* Desktop, right: customer, totals and Pay. A fixed-width column. */}
       <aside aria-label="Customer and totals" className="hidden w-88 shrink-0 flex-col gap-3 border-l bg-muted/30 p-3 lg:flex">
         {billSummary}
         {payButton("h-14 shrink-0 justify-between gap-3 px-4 text-lg")}
       </aside>
 
-      {/* Narrow screens: the totals become a sticky bar with Pay always in reach. */}
-      <div className="flex h-16 shrink-0 items-center gap-2 border-t bg-background px-2 sm:px-3 lg:hidden">
-        <button
-          type="button"
-          onClick={() => setDetailsOpen(true)}
-          className="flex h-12 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
-          aria-label="Show customer and tax details"
-        >
-          <ChevronUp className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-          <span className="min-w-0">
-            <span className="block truncate text-xs text-muted-foreground">
-              {summary.itemCount} {summary.itemCount === 1 ? "item" : "items"} · {cart.customer?.name || (cart.customer ? "Customer" : "Walk-in")}
-            </span>
-            <span className={cn("block truncate text-xs", issues.length > 0 && cart.lines.length > 0 ? "text-destructive" : "text-muted-foreground")}>
-              {issues.length > 0 && cart.lines.length > 0 ? issues[0].message : "Tap for customer, discount and tax"}
-            </span>
-          </span>
-        </button>
-        {payButton("h-12 shrink-0 gap-2 px-4 text-base")}
-      </div>
+      {/* Phones and small tablets: tap tiles to add, sticky bill bar with Pay. */}
+      <QuickBill
+        index={index}
+        catalog={catalog}
+        cart={cart}
+        summary={summary}
+        issues={issues}
+        ctx={ctx}
+        settings={settings}
+        recentIds={recentIds}
+        nothingToSell={nothingToSell}
+        stockOf={stockOf}
+        searchRef={mobileSearchRef}
+        parkedCount={parkedCount}
+        posting={posting}
+        refreshing={refreshing}
+        onRefreshCatalog={onRefreshCatalog}
+        onAddProduct={addToCart}
+        onOpenManual={openManual}
+        onOpenQuickItem={setQuickItem}
+        onOpenScanner={() => setScanOpen(true)}
+        onOpenBill={() => setBillOpen(true)}
+        onOpenParked={() => setDialog("parked")}
+        onPay={openPay}
+      />
 
-      <Sheet open={detailsOpen} onOpenChange={setDetailsOpen}>
-        <SheetContent side="bottom" className="max-h-[88dvh] gap-0 lg:hidden">
-          <SheetHeader className="pb-2">
-            <SheetTitle>Customer and totals</SheetTitle>
-            <SheetDescription className="sr-only">Customer, discount and tax breakdown for this bill.</SheetDescription>
-          </SheetHeader>
-          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 pb-3">
-            {billSummary}
-            {payButton("h-12 shrink-0 justify-between gap-3 px-4 text-base")}
-          </div>
-        </SheetContent>
-      </Sheet>
+      <BillSheet
+        open={billOpen}
+        onOpenChange={setBillOpen}
+        cart={cart}
+        summary={summary}
+        ctx={ctx}
+        issues={issues}
+        handlers={billSheetHandlers}
+        parkedCount={parkedCount}
+        dirty={dirty}
+        posting={posting}
+        onOpenCustomer={() => setDialog("customer")}
+        onOpenDiscount={openDiscount}
+        onHold={() => void holdBill()}
+        onOpenParked={() => setDialog("parked")}
+        onClear={requestClear}
+        onPay={openPay}
+      />
+      <QuickPaySheet
+        open={quickPayOpen}
+        onOpenChange={setQuickPayOpen}
+        cart={cart}
+        summary={summary}
+        settings={settings}
+        services={services}
+        posting={posting}
+        error={payError}
+        onConfirm={(confirmation) => void confirmPayment(confirmation)}
+        onSplit={openSplit}
+        onOpenCustomer={() => setDialog("customer")}
+        onRefreshCatalog={
+          onRefreshCatalog
+            ? () => {
+                setQuickPayOpen(false);
+                setPayError(null);
+                onRefreshCatalog();
+              }
+            : undefined
+        }
+      />
+      <CameraScanner open={scanOpen} onOpenChange={setScanOpen} onDetected={addScanned} />
+      <QuickItemDialog
+        item={quickItem}
+        variant={isDesktop ? "dialog" : "sheet"}
+        onOpenChange={(open) => !open && setQuickItem(null)}
+        onClosed={afterDialog}
+        ctx={ctx}
+        businessId={settings.businessId}
+        onAdd={addManual}
+      />
 
       <CustomerDialog
         open={dialog === "customer"}
@@ -461,7 +639,7 @@ export function PosScreen({
         settings={settings}
         services={services}
         onCart={setRawCart}
-        onClosed={focusSearch}
+        onClosed={afterDialog}
       />
       <DiscountDialog
         open={dialog === "discount"}
@@ -470,7 +648,7 @@ export function PosScreen({
         summary={summary}
         ctx={ctx}
         onApply={applyBillDiscount}
-        onClosed={focusSearch}
+        onClosed={afterDialog}
       />
       <PaymentDialog
         open={dialog === "pay"}
@@ -490,7 +668,16 @@ export function PosScreen({
               }
             : undefined
         }
-        onClosed={focusSearch}
+        onClosed={afterDialog}
+      />
+      <ManualItemDialog
+        open={dialog === "manual"}
+        initialName={manualName}
+        onOpenChange={closeDialog("manual")}
+        ctx={ctx}
+        settings={settings}
+        onAdd={addManual}
+        onClosed={afterDialog}
       />
       <ParkedDialog
         open={dialog === "parked"}
@@ -499,22 +686,22 @@ export function PosScreen({
         currentBillInUse={dirty}
         onResume={(bill) => void resumeBill(bill)}
         onChanged={() => void refreshParkedCount()}
-        onClosed={focusSearch}
+        onClosed={afterDialog}
       />
       <SuccessDialog
         bill={posted}
+        variant={isDesktop ? "dialog" : "screen"}
         settings={settings}
         sendEmailReceipt={services.sendEmailReceipt}
         printQueuedBill={services.printQueuedBill}
         onNewBill={() => setPosted(null)}
-        onClosed={focusSearch}
+        onClosed={afterDialog}
       />
 
       <AlertDialog open={dialog === "clear"} onOpenChange={closeDialog("clear")}>
         <AlertDialogContent
           onCloseAutoFocus={(e) => {
-            e.preventDefault();
-            focusSearch();
+            if (afterDialog() !== false) e.preventDefault();
           }}
         >
           <AlertDialogHeader>
@@ -530,6 +717,7 @@ export function PosScreen({
               onClick={() => {
                 startNewBill();
                 setDialog(null);
+                setBillOpen(false);
               }}
             >
               Clear bill

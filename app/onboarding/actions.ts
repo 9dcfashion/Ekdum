@@ -174,6 +174,7 @@ export async function saveInvoiceSettingsAction(input: unknown) {
           round_off_enabled: data.round_off_enabled,
           invoice_terms: data.invoice_terms,
           invoice_footer: data.invoice_footer,
+          signatory_label: data.signatory_label,
         })
         .eq("id", ctx.business.id),
     );

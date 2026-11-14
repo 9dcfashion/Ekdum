@@ -152,7 +152,10 @@ export async function deliverJob(job: OutboxJob, deps: DeliveryDeps): Promise<De
       // Consent is checked again at send time: the customer may have opted out since the job was queued.
       const optedIn = await deps.customerOptedIn(bundle.invoice.customer_id, bundle.invoice.business_id);
       if (!optedIn) return permanentFailure(FAILURE.notOptedIn);
-      const result = await deps.whatsapp.sendInvoice(buildWhatsAppMessage(job, bundle, deps.absoluteUrl));
+      const message = buildWhatsAppMessage(job, bundle, deps.absoluteUrl);
+      // Providers that cannot rely on WhatsApp fetching pdfUrl (e.g. a self-hosted gateway) get the file itself.
+      if (deps.whatsapp.attachesPdf) message.pdf = await deps.renderPdf(bundle);
+      const result = await deps.whatsapp.sendInvoice(message);
       return result.ok
         ? { success: true, messageId: result.messageId, permanent: false }
         : { success: false, error: safeErrorText(result.error), permanent: result.permanent === true };

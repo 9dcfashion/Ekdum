@@ -1,6 +1,17 @@
-import { Document, Image, Page, StyleSheet, Text, View } from "@react-pdf/renderer";
-import type { InvoiceView, InvoiceViewLine } from "@/lib/invoices/view";
-import { pdfMoney, pdfRupees, pdfSigned } from "./format";
+import type { ReactNode } from "react";
+import { Document, Font, Image, Page, StyleSheet, Text, View, type Styles } from "@react-pdf/renderer";
+import {
+  SHEET_GRID as G,
+  SHEET_LEFT,
+  SHEET_RIGHT,
+  buildInvoiceSheet,
+  sheetColumns,
+  upiIdLines,
+  type InvoiceSheet,
+  type SheetAlign,
+  type SheetCharge,
+} from "@/lib/invoices/sheet";
+import type { InvoiceView } from "@/lib/invoices/view";
 
 /** A PNG or JPEG the PDF engine can embed. */
 export interface PdfImage {
@@ -16,23 +27,54 @@ export interface InvoiceDocumentProps {
   upiQr?: string | null;
 }
 
-const INK = "#18181b";
-const MUTED = "#52525b";
-const RULE = "#d4d4d8";
-const SOFT = "#f4f4f5";
+/** The item-table columns of this bill (exported for tests). */
+export const invoiceColumns = sheetColumns;
+
+// The shopkeeper's sheet: dark navy text, black grid lines, accents in the brand colour.
+const NAVY = "#1F3864";
+const LINE = "#000000";
+const BORDER = 0.8;
+const ROW = 16;
 const BOLD = "Helvetica-Bold";
+const SERIF = "Times-Bold";
+const FONT = 10;
+
+// Wrap long words (addresses, bank names) whole, as a spreadsheet does, never "VA-SAI".
+Font.registerHyphenationCallback((word) => [word]);
 
 const s = StyleSheet.create({
-  page: {
-    paddingTop: 34,
-    paddingBottom: 46,
-    paddingHorizontal: 30,
-    fontFamily: "Helvetica",
-    fontSize: 8.5,
-    color: INK,
+  // Note: no page-level lineHeight. An inherited lineHeight makes react-pdf drop `render` text.
+  page: { paddingTop: 34, paddingBottom: 44, paddingHorizontal: 36, fontFamily: "Helvetica", fontSize: FONT, color: NAVY },
+  row: { flexDirection: "row", borderLeftWidth: BORDER, borderLeftColor: LINE },
+  inner: { flexDirection: "row" },
+  top: { borderTopWidth: BORDER, borderTopColor: LINE },
+  cell: {
+    minHeight: ROW,
+    justifyContent: "center",
+    paddingHorizontal: 3,
+    paddingVertical: 1.5,
+    borderRightWidth: BORDER,
+    borderRightColor: LINE,
+    borderBottomWidth: BORDER,
+    borderBottomColor: LINE,
   },
-  brandBar: { position: "absolute", top: 0, left: 0, right: 0, height: 7 },
-  pageFooter: { position: "absolute", bottom: 20, left: 30, right: 30, fontSize: 7, color: MUTED },
+  bold: { fontFamily: BOLD },
+  name: { fontFamily: SERIF, fontSize: 17, textAlign: "center" },
+  tagline: { fontFamily: BOLD, fontSize: 8, textAlign: "center" },
+  address: { fontFamily: BOLD, fontSize: 7.6, textAlign: "center" },
+  title: { fontFamily: BOLD, fontSize: 9.5, textAlign: "center", letterSpacing: 0.3 },
+  copy: { fontSize: 5.8, textAlign: "center", marginTop: 1.5, color: "#44546A" },
+  th: { fontFamily: BOLD, textAlign: "center" },
+  words: { fontFamily: BOLD, textAlign: "center" },
+  grandLabel: { fontFamily: BOLD, fontSize: 12.5 },
+  grandValue: { fontFamily: BOLD, fontSize: 11, textAlign: "center" },
+  serif: { fontFamily: SERIF, fontSize: 12 },
+  logo: { width: 40, height: 36, objectFit: "contain" },
+  qr: { width: 34, height: 34 },
+  upiId: { fontSize: 5.6, textAlign: "center" },
+  footerNote: { marginTop: 6, fontSize: 7.5, textAlign: "center" },
+  cancelNote: { marginTop: 6, fontSize: 8, color: "#dc2626", textAlign: "center" },
+  pageFooter: { position: "absolute", bottom: 20, left: 36, right: 36, fontSize: 7, color: "#52525b", textAlign: "right" },
   watermark: {
     position: "absolute",
     top: 360,
@@ -45,200 +87,247 @@ const s = StyleSheet.create({
     opacity: 0.16,
     transform: "rotate(-35deg)",
   },
-  bold: { fontFamily: BOLD },
-  muted: { color: MUTED },
-  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
-  sellerRow: { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, paddingRight: 14 },
-  logo: { width: 52, height: 52, objectFit: "contain", marginRight: 10 },
-  sellerName: { fontSize: 15, fontFamily: BOLD, lineHeight: 1.2, marginBottom: 2 },
-  titleBox: { width: 190, alignItems: "flex-end" },
-  title: { fontSize: 17, fontFamily: BOLD, lineHeight: 1.15, textTransform: "uppercase" },
-  cancelledTag: {
-    marginTop: 4,
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    borderWidth: 1,
-    borderColor: "#dc2626",
-    color: "#dc2626",
-    fontFamily: BOLD,
-    fontSize: 8,
-  },
-  metaRow: { flexDirection: "row", marginTop: 12, borderWidth: 0.75, borderColor: RULE },
-  metaBox: { flexGrow: 1, flexShrink: 1, flexBasis: 0, padding: 8 },
-  metaBoxRight: { borderLeftWidth: 0.75, borderLeftColor: RULE },
-  boxLabel: { fontSize: 7, fontFamily: BOLD, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 3 },
-  kv: { flexDirection: "row", marginBottom: 1.5 },
-  kvKey: { width: 84, color: MUTED },
-  kvValue: { flexGrow: 1, flexShrink: 1, flexBasis: 0 },
-  caption: { marginTop: 10, marginBottom: 3, fontSize: 7, color: MUTED, textAlign: "right" },
-  th: {
-    flexDirection: "row",
-    alignItems: "center",
-    color: "#ffffff",
-    fontFamily: BOLD,
-    fontSize: 7.2,
-    paddingVertical: 4,
-  },
-  tr: {
-    flexDirection: "row",
-    borderBottomWidth: 0.5,
-    borderBottomColor: RULE,
-    borderLeftWidth: 0.5,
-    borderLeftColor: RULE,
-    borderRightWidth: 0.5,
-    borderRightColor: RULE,
-    paddingVertical: 3.5,
-    fontSize: 7.8,
-  },
-  cell: { paddingHorizontal: 3 },
-  closing: { marginTop: 10, flexDirection: "row" },
-  closingLeft: { flexGrow: 1, flexShrink: 1, flexBasis: 0, paddingRight: 14 },
-  totalsBox: { width: 210 },
-  totalRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 2, paddingHorizontal: 6 },
-  grandTotal: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 5,
-    paddingHorizontal: 6,
-    marginTop: 3,
-    color: "#ffffff",
-    fontFamily: BOLD,
-    fontSize: 10.5,
-  },
-  wordsBox: { backgroundColor: SOFT, padding: 6, marginBottom: 8 },
-  miniTh: { flexDirection: "row", backgroundColor: SOFT, fontFamily: BOLD, fontSize: 7, paddingVertical: 3 },
-  miniTr: { flexDirection: "row", fontSize: 7.5, paddingVertical: 2.5, borderBottomWidth: 0.5, borderBottomColor: RULE },
-  payRow: { flexDirection: "row", marginTop: 12 },
-  payBox: { flexGrow: 1, flexShrink: 1, flexBasis: 0, paddingRight: 12 },
-  qrBox: { width: 104, alignItems: "center" },
-  qr: { width: 84, height: 84 },
-  signBox: { width: 170, alignItems: "flex-end", justifyContent: "space-between" },
-  signLine: { marginTop: 40, borderTopWidth: 0.75, borderTopColor: INK, paddingTop: 3, width: 150, textAlign: "center" },
-  terms: { marginTop: 12 },
-  declaration: { marginTop: 10, padding: 6, borderWidth: 0.75, borderColor: RULE, fontFamily: BOLD, fontSize: 8 },
-  footerNote: { marginTop: 12, textAlign: "center", color: MUTED },
 });
 
-type Align = "left" | "right" | "center";
+type Style = Styles[string];
 
-interface Column {
-  key: string;
-  label: string;
-  /** Fixed width in points; the description column grows instead. */
-  width?: number;
-  align: Align;
-  value: (line: InvoiceViewLine, index: number) => string;
-}
+/** `part` as a percentage of `whole` (both in grid percent), for widths inside a nested block. */
+const pct = (part: number, whole = 100) => `${(part / whole) * 100}%`;
 
-/** The line-item columns for this document: tax columns only on a tax invoice, IGST or CGST+SGST by supply. */
-export function invoiceColumns(view: InvoiceView): Column[] {
-  const columns: Column[] = [
-    { key: "no", label: "#", width: 18, align: "center", value: (_l, i) => String(i + 1) },
-    { key: "description", label: "Description of goods / services", align: "left", value: (l) => l.description },
-  ];
-  if (view.showHsn) columns.push({ key: "hsn", label: "HSN/SAC", width: 40, align: "left", value: (l) => l.hsn });
-  columns.push(
-    { key: "qty", label: "Qty", width: 34, align: "right", value: (l) => l.quantity },
-    { key: "unit", label: "Unit", width: 26, align: "left", value: (l) => l.unit },
-    { key: "rate", label: "Rate", width: 48, align: "right", value: (l) => pdfMoney(l.unitPricePaise) },
-    { key: "discount", label: "Disc.", width: 38, align: "right", value: (l) => pdfMoney(l.discountPaise) },
-  );
-  if (view.showTax) {
-    columns.push(
-      { key: "taxable", label: "Taxable value", width: 52, align: "right", value: (l) => pdfMoney(l.taxablePaise) },
-      { key: "gst", label: "GST%", width: 30, align: "right", value: (l) => l.gstRate },
-    );
-    if (view.interState) {
-      columns.push({ key: "igst", label: "IGST", width: 46, align: "right", value: (l) => pdfMoney(l.igstPaise) });
-    } else {
-      columns.push(
-        { key: "cgst", label: "CGST", width: 40, align: "right", value: (l) => pdfMoney(l.cgstPaise) },
-        { key: "sgst", label: "SGST", width: 40, align: "right", value: (l) => pdfMoney(l.sgstPaise) },
-      );
-    }
-    if (view.showCess) {
-      columns.push({ key: "cess", label: "Cess", width: 36, align: "right", value: (l) => pdfMoney(l.cessPaise) });
-    }
-  }
-  columns.push({ key: "total", label: "Amount", width: 56, align: "right", value: (l) => pdfMoney(l.totalPaise) });
-  return columns;
-}
-
-function cellStyle(column: Column) {
-  return [
-    s.cell,
-    column.width ? { width: column.width } : { flexGrow: 1, flexShrink: 1, flexBasis: 0 },
-    { textAlign: column.align },
-  ];
-}
-
-function LineRow({ line, index, columns }: { line: InvoiceViewLine; index: number; columns: Column[] }) {
+function Cell({
+  width,
+  align = "left",
+  height,
+  grow,
+  noBottom,
+  style,
+  textStyle,
+  children,
+}: {
+  width?: string;
+  align?: SheetAlign;
+  height?: number;
+  /** Share of any spare height in a stack of cells (true = 1). */
+  grow?: boolean | number;
+  noBottom?: boolean;
+  style?: Style | Style[];
+  textStyle?: Style | Style[];
+  children?: ReactNode;
+}) {
+  const box: Style[] = [s.cell];
+  if (width) box.push({ width });
+  if (height) box.push({ minHeight: height });
+  if (grow) box.push({ flexGrow: grow === true ? 1 : grow });
+  if (noBottom) box.push({ borderBottomWidth: 0 });
+  if (style) box.push(...(Array.isArray(style) ? style : [style]));
+  const text: Style[] = [{ textAlign: align }];
+  if (textStyle) text.push(...(Array.isArray(textStyle) ? textStyle : [textStyle]));
   return (
-    <View style={s.tr} wrap={false}>
-      {columns.map((column) => (
-        <Text key={column.key} style={cellStyle(column)}>
-          {column.value(line, index)}
-        </Text>
+    <View style={box}>
+      {typeof children === "string" || typeof children === "number" ? <Text style={text}>{children}</Text> : children}
+    </View>
+  );
+}
+
+function ItemRow({ sheet, index }: { sheet: InvoiceSheet; index: number }) {
+  const row = sheet.rows[index];
+  return (
+    <View style={s.row} wrap={false}>
+      {sheet.columns.map((column, i) => (
+        <Cell key={column.key} width={pct(column.width)} align={column.align}>
+          {row.cells[i]}
+        </Cell>
       ))}
     </View>
   );
 }
 
-function KeyValue({ label, value }: { label: string; value: string | null | undefined }) {
-  if (!value) return null;
+/** "Add SGST" | "1.5%" in the D-E box, the amount in F. An empty row when `charge` is null. */
+function ChargeRow({ charge }: { charge: SheetCharge | null }) {
+  const de = G.d + G.e;
+  // Every row takes an equal share if the bank details on the left need more height.
   return (
-    <View style={s.kv}>
-      <Text style={s.kvKey}>{label}</Text>
-      <Text style={s.kvValue}>{value}</Text>
+    <View style={[s.inner, { flexGrow: 1 }]}>
+      <Cell width={pct(de, SHEET_RIGHT)}>
+        {charge ? (
+          <View style={{ flexDirection: "row" }}>
+            <Text style={[s.bold, { width: "50%" }]}>{charge.label}</Text>
+            <Text style={s.bold}>{charge.rate}</Text>
+          </View>
+        ) : null}
+      </Cell>
+      <Cell width={pct(G.f, SHEET_RIGHT)} align="center" textStyle={s.bold}>
+        {charge?.amount ?? ""}
+      </Cell>
     </View>
   );
 }
 
-function TotalRow({ label, value, bold }: { label: string; value: string; bold?: boolean }) {
-  return (
-    <View style={s.totalRow}>
-      <Text style={bold ? s.bold : undefined}>{label}</Text>
-      <Text style={bold ? s.bold : undefined}>{value}</Text>
-    </View>
-  );
-}
+/**
+ * Bank details on the left, as tall as the tax rows on the right. The bank lines sit in their
+ * own rows like the original (the first one taking any spare height); the UPI QR, when there is
+ * one, fills a box at the right edge of the block with the UPI ID under it.
+ */
+function BankBlock({ sheet, brand, upiQr }: { sheet: InvoiceSheet; brand: string; upiQr: string | null }) {
+  const rows = sheet.charges.length;
+  const bank = sheet.bank;
+  const qr = bank?.upiId && upiQr ? upiQr : null;
+  const lines = bank ? [...bank.lines] : [];
+  // No QR image (it could not be made): print the UPI ID as a bank line instead.
+  if (bank?.upiId && !qr) lines.push(`UPI: ${bank.upiId}`);
+  const spare = Math.max(rows - lines.length, 0);
+  // Room for the bank lines is tighter beside the QR.
+  const bankFont = qr ? 9.5 : FONT;
 
-function TaxSummary({ view }: { view: InvoiceView }) {
-  if (!view.showTax || view.taxSummary.length === 0) return null;
-  const w = { flexGrow: 1, flexShrink: 1, flexBasis: 0, textAlign: "right" as const, paddingHorizontal: 3 };
   return (
-    <View style={{ marginBottom: 8 }}>
-      <Text style={[s.boxLabel, { color: view.brandColor }]}>Tax summary</Text>
-      <View style={s.miniTh}>
-        <Text style={{ width: 44, paddingHorizontal: 3 }}>GST rate</Text>
-        <Text style={w}>Taxable</Text>
-        {view.interState ? <Text style={w}>IGST</Text> : <Text style={w}>CGST</Text>}
-        {view.interState ? null : <Text style={w}>SGST</Text>}
-        {view.showCess ? <Text style={w}>Cess</Text> : null}
-        <Text style={w}>Total tax</Text>
+    <View style={s.row}>
+      <View style={{ width: pct(SHEET_LEFT), flexDirection: "row" }}>
+        <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }}>
+          {lines.length === 0 ? <Cell grow /> : null}
+          {lines.map((line, i) => (
+            <Cell
+              key={i}
+              height={ROW * (i === 0 ? spare + 1 : 1)}
+              grow={i === 0 ? spare + 1 : 1}
+              style={{ paddingVertical: 0 }}
+              // One wrapped line per row of the block, like text wrapping in a merged spreadsheet cell.
+              textStyle={[s.bold, { color: brand, fontSize: bankFont, lineHeight: `${ROW - BORDER}pt` }]}
+            >
+              {line}
+            </Cell>
+          ))}
+        </View>
+        {qr && bank?.upiId ? (
+          <Cell style={{ width: 50, alignItems: "center", paddingVertical: 1.5, paddingHorizontal: 1 }}>
+            {/* react-pdf images have no alt text. */}
+            {/* eslint-disable-next-line jsx-a11y/alt-text */}
+            <Image src={qr} style={s.qr} />
+            {upiIdLines(bank.upiId).map((line, i) => (
+              <Text key={i} style={s.upiId}>
+                {line}
+              </Text>
+            ))}
+          </Cell>
+        ) : null}
       </View>
-      {view.taxSummary.map((row) => (
-        <View key={row.gstRate} style={s.miniTr}>
-          <Text style={{ width: 44, paddingHorizontal: 3 }}>{row.rateLabel}</Text>
-          <Text style={w}>{pdfMoney(row.taxablePaise)}</Text>
-          {view.interState ? <Text style={w}>{pdfMoney(row.igstPaise)}</Text> : <Text style={w}>{pdfMoney(row.cgstPaise)}</Text>}
-          {view.interState ? null : <Text style={w}>{pdfMoney(row.sgstPaise)}</Text>}
-          {view.showCess ? <Text style={w}>{pdfMoney(row.cessPaise)}</Text> : null}
-          <Text style={w}>{pdfMoney(row.cgstPaise + row.sgstPaise + row.igstPaise + row.cessPaise)}</Text>
+      <View style={{ width: pct(SHEET_RIGHT) }}>
+        {sheet.charges.map((charge, i) => (
+          <ChargeRow key={i} charge={charge} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+/** Two stacked lines in a label box that spans two rows ("Tax" / "Amount"). */
+function SpanLabel({ lines, width }: { lines: [string, string]; width: string }) {
+  return (
+    <Cell width={width} style={{ paddingVertical: 0 }}>
+      {lines.map((line, i) => (
+        <View key={i} style={{ flexGrow: 1, justifyContent: "center" }}>
+          <Text style={[s.bold, { textAlign: "center" }]}>{line}</Text>
         </View>
       ))}
-    </View>
+    </Cell>
   );
 }
 
-/** The single A4 master template. Driven entirely by the invoice view (business + outlet settings). */
+/** The empty split row of the sheet: D | E | F. */
+function SplitCells({ grow }: { grow?: boolean }) {
+  return (
+    <>
+      <Cell width={pct(G.d)} grow={grow} />
+      <Cell width={pct(G.e)} grow={grow} />
+      <Cell width={pct(G.f)} grow={grow} />
+    </>
+  );
+}
+
+/** Words, grand total, balance due, terms and signature: the bottom of the sheet. */
+function Closing({ sheet, brand }: { sheet: InvoiceSheet; brand: string }) {
+  const rest = 100 - G.a;
+  const bc = G.b + G.c;
+  const de = G.d + G.e;
+  const termRows = Math.max(3, sheet.terms.length);
+
+  return (
+    <>
+      {/* "Tax Amount" + tax in words | "Total Amount" + grand total */}
+      <View style={s.row}>
+        <SpanLabel lines={sheet.wordsLabel} width={pct(G.a)} />
+        <View style={{ width: pct(rest) }}>
+          <View style={s.inner}>
+            <Cell width={pct(bc, rest)} textStyle={s.words}>
+              {sheet.words[0]}
+            </Cell>
+            <Cell width={pct(de, rest)} />
+            <Cell width={pct(G.f, rest)} />
+          </View>
+          <View style={[s.inner, { flexGrow: 1 }]}>
+            <Cell width={pct(bc, rest)} textStyle={s.words}>
+              {sheet.words[1]}
+            </Cell>
+            <Cell width={pct(de, rest)} textStyle={s.grandLabel}>
+              Total Amount
+            </Cell>
+            <Cell width={pct(G.f, rest)} textStyle={s.grandValue}>
+              {sheet.grandTotal}
+            </Cell>
+          </View>
+        </View>
+      </View>
+
+      {/* The bill total in words (tax invoices) | balance due */}
+      <View style={s.row}>
+        <Cell width={pct(SHEET_LEFT)}>
+          {sheet.totalInWords ? (
+            <Text style={{ fontSize: 8.5 }}>
+              Amount in words: <Text style={s.bold}>{sheet.totalInWords}</Text>
+            </Text>
+          ) : null}
+        </Cell>
+        {sheet.balanceDue ? (
+          <>
+            <Cell width={pct(de)} textStyle={s.bold}>
+              Balance Due
+            </Cell>
+            <Cell width={pct(G.f)} align="center" textStyle={s.bold}>
+              {sheet.balanceDue}
+            </Cell>
+          </>
+        ) : (
+          <SplitCells />
+        )}
+      </View>
+
+      {/* Terms | For {shop}, a blank row to sign in, the signatory title */}
+      {Array.from({ length: termRows }, (_, i) => (
+        <View key={i} style={s.row}>
+          <Cell width={pct(SHEET_LEFT)}>{sheet.terms[i] ?? ""}</Cell>
+          {i === 0 ? (
+            <Cell width={pct(SHEET_RIGHT)} align="center" textStyle={[s.serif, { color: brand }]}>
+              {sheet.signatoryFor}
+            </Cell>
+          ) : i === termRows - 1 ? (
+            <Cell width={pct(SHEET_RIGHT)} align="right" textStyle={[s.serif, { color: brand, paddingRight: 14 }]}>
+              {sheet.signatoryLabel}
+            </Cell>
+          ) : (
+            <SplitCells />
+          )}
+        </View>
+      ))}
+    </>
+  );
+}
+
+/** The single A4 template: the shopkeeper's boxed bill, filled from the invoice view. */
 export function InvoiceDocument({ view, logo, upiQr }: InvoiceDocumentProps) {
   const brand = view.brandColor;
-  const columns = invoiceColumns(view);
-  const bodyLines = view.lines.slice(0, -1);
-  const lastLine = view.lines.length > 0 ? view.lines[view.lines.length - 1] : null;
-  const t = view.totals;
-  const received = view.payments.filter((p) => p.mode !== "credit");
+  const sheet = buildInvoiceSheet(view);
+  const accent = { color: brand };
+  const last = sheet.rows.length - 1;
+  const headerRight = 100 - G.a - G.f;
 
   return (
     <Document
@@ -249,195 +338,103 @@ export function InvoiceDocument({ view, logo, upiQr }: InvoiceDocumentProps) {
       producer="EkDum"
     >
       <Page size="A4" style={s.page}>
-        <View style={[s.brandBar, { backgroundColor: brand }]} fixed />
         {view.cancelled ? (
           <Text style={s.watermark} fixed>
             CANCELLED
           </Text>
         ) : null}
-
-        {/* Note: no page-level lineHeight. An inherited lineHeight makes react-pdf drop `render` text. */}
-        <Text style={s.pageFooter} fixed>
-          {view.title} {view.number} | {view.seller.name}
-        </Text>
         <Text
-          style={[s.pageFooter, { textAlign: "right" }]}
-          render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`}
+          style={s.pageFooter}
+          render={({ pageNumber, totalPages }) =>
+            totalPages > 1 ? `${view.title} ${view.number}  |  Page ${pageNumber} of ${totalPages}` : ""
+          }
           fixed
         />
 
-        {/* Supplier and document title */}
-        <View style={s.header}>
-          <View style={s.sellerRow}>
-            {/* react-pdf images have no alt text. */}
+        {/* Logo | shop name over the tagline | document title */}
+        <View style={[s.row, s.top]}>
+          <Cell width={pct(G.a)} style={{ alignItems: "center", paddingHorizontal: 2 }}>
             {/* eslint-disable-next-line jsx-a11y/alt-text */}
             {logo ? <Image src={logo} style={s.logo} /> : null}
-            <View style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }}>
-              <Text style={s.sellerName}>{view.seller.name}</Text>
-              {view.seller.legalName ? <Text style={s.muted}>{view.seller.legalName}</Text> : null}
-              {view.seller.addressLines.map((line, i) => (
-                <Text key={i}>{line}</Text>
-              ))}
-              {view.seller.state ? <Text>State: {view.seller.state}</Text> : null}
-              {view.seller.phone || view.seller.email ? (
-                <Text>
-                  {[view.seller.phone ? `Phone: ${view.seller.phone}` : null, view.seller.email ? `Email: ${view.seller.email}` : null]
-                    .filter(Boolean)
-                    .join("   ")}
-                </Text>
-              ) : null}
-              {view.seller.gstin ? <Text style={s.bold}>GSTIN: {view.seller.gstin}</Text> : null}
+          </Cell>
+          <View style={{ width: pct(headerRight) }}>
+            <Cell height={sheet.tagline ? 24 : 34} grow={!sheet.tagline} textStyle={[s.name, accent]}>
+              {sheet.shopName}
+            </Cell>
+            {sheet.tagline ? (
+              <Cell height={14} grow textStyle={[s.tagline, accent]}>
+                {sheet.tagline}
+              </Cell>
+            ) : null}
+          </View>
+          <Cell width={pct(G.f)} style={{ paddingHorizontal: 2 }}>
+            <Text style={s.title}>{sheet.title}</Text>
+            <Text style={s.copy}>{sheet.copyLabel}</Text>
+          </Cell>
+        </View>
+
+        {sheet.addressRow ? (
+          <View style={s.row}>
+            <Cell width="100%" textStyle={s.address}>
+              {sheet.addressRow}
+            </Cell>
+          </View>
+        ) : null}
+
+        {/* Buyer | invoice details. The last row has no bottom line: the table header draws it. */}
+        {sheet.parties.map((row, i) => {
+          const end = i === sheet.parties.length - 1;
+          return (
+            <View key={i} style={s.row}>
+              <Cell width={pct(SHEET_LEFT)} noBottom={end}>
+                {row.left?.text ?? ""}
+              </Cell>
+              <Cell
+                width={pct(SHEET_RIGHT)}
+                noBottom={end}
+                textStyle={row.right?.accent ? [s.bold, accent] : undefined}
+              >
+                {row.right?.text ?? ""}
+              </Cell>
             </View>
-          </View>
-          <View style={s.titleBox}>
-            <Text style={[s.title, { color: brand }]}>{view.title}</Text>
-            <Text style={{ fontSize: 10.5, fontFamily: BOLD, marginTop: 3 }}>{view.number}</Text>
-            <Text style={[s.muted, { marginTop: 2 }]}>Date: {view.date}</Text>
-            {view.cancelled ? <Text style={s.cancelledTag}>CANCELLED</Text> : null}
-          </View>
-        </View>
+          );
+        })}
 
-        {/* Recipient and document details */}
-        <View style={s.metaRow}>
-          <View style={s.metaBox}>
-            <Text style={[s.boxLabel, { color: brand }]}>Bill to</Text>
-            {view.recipient ? (
-              <View>
-                {view.recipient.name ? <Text style={[s.bold, { fontSize: 9.5 }]}>{view.recipient.name}</Text> : null}
-                {view.recipient.addressLines.map((line, i) => (
-                  <Text key={i}>{line}</Text>
-                ))}
-                {view.recipient.state ? <Text>State: {view.recipient.state}</Text> : null}
-                {view.recipient.phone ? <Text>Phone: {view.recipient.phone}</Text> : null}
-                {view.recipient.email ? <Text>Email: {view.recipient.email}</Text> : null}
-                {view.recipient.gstin ? <Text style={s.bold}>GSTIN: {view.recipient.gstin}</Text> : null}
-              </View>
-            ) : (
-              <Text>Cash sale</Text>
-            )}
-          </View>
-          <View style={[s.metaBox, s.metaBoxRight]}>
-            <Text style={[s.boxLabel, { color: brand }]}>Details</Text>
-            <KeyValue label={view.showGstFields ? "Invoice no." : "Bill no."} value={view.number} />
-            <KeyValue label="Date" value={view.date} />
-            <KeyValue label="Place of supply" value={view.placeOfSupply} />
-            <KeyValue label="Reverse charge" value={view.reverseCharge} />
-            <KeyValue label="Issued from" value={view.seller.outletName} />
-          </View>
-        </View>
-
-        {/* Line items. The header row is `fixed`, so it repeats on every page the table reaches. */}
-        <Text style={s.caption}>All amounts are in Indian Rupees (INR)</Text>
-        <View style={[s.th, { backgroundColor: brand }]} fixed>
-          {columns.map((column) => (
-            <Text key={column.key} style={cellStyle(column)}>
+        {/* The table header is `fixed`, so it repeats on every page the table reaches. */}
+        <View style={[s.row, s.top]} fixed>
+          {sheet.columns.map((column) => (
+            <Cell key={column.key} width={pct(column.width)} textStyle={s.th}>
               {column.label}
-            </Text>
+            </Cell>
           ))}
         </View>
-        {bodyLines.map((line, index) => (
-          <LineRow key={line.lineNo} line={line} index={index} columns={columns} />
+        {sheet.rows.slice(0, Math.max(last, 0)).map((row, index) => (
+          <ItemRow key={row.key} sheet={sheet} index={index} />
         ))}
 
-        {/* The last line travels with the totals, so totals never sit alone on a page. */}
+        {/* The last line travels with the totals, so the totals never sit alone on a page. */}
         <View wrap={false}>
-          {lastLine ? <LineRow line={lastLine} index={view.lines.length - 1} columns={columns} /> : null}
+          {last >= 0 ? <ItemRow sheet={sheet} index={last} /> : null}
 
-          <View style={s.closing}>
-            <View style={s.closingLeft}>
-              <View style={s.wordsBox}>
-                <Text style={[s.boxLabel, { color: brand }]}>Amount in words</Text>
-                <Text style={s.bold}>{view.amountInWords}</Text>
-              </View>
-              <TaxSummary view={view} />
-              {received.length > 0 ? (
-                <View>
-                  <Text style={[s.boxLabel, { color: brand }]}>Payments received</Text>
-                  {received.map((p, i) => (
-                    <Text key={i}>
-                      {p.date} · {p.label}
-                      {p.reference ? ` (${p.reference})` : ""} · Rs. {pdfMoney(p.amountPaise)}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-              {view.notes ? (
-                <View style={{ marginTop: 6 }}>
-                  <Text style={[s.boxLabel, { color: brand }]}>Notes</Text>
-                  <Text>{view.notes}</Text>
-                </View>
-              ) : null}
-            </View>
-
-            <View style={s.totalsBox}>
-              {view.showTax ? null : <TotalRow label="Subtotal" value={pdfMoney(t.subtotalPaise)} />}
-              {t.discountPaise > 0 ? <TotalRow label="Discount" value={`-${pdfMoney(t.discountPaise)}`} /> : null}
-              {view.showTax ? <TotalRow label="Taxable value" value={pdfMoney(t.taxablePaise)} /> : null}
-              {view.showTax && !view.interState ? <TotalRow label="CGST" value={pdfMoney(t.cgstPaise)} /> : null}
-              {view.showTax && !view.interState ? <TotalRow label="SGST" value={pdfMoney(t.sgstPaise)} /> : null}
-              {view.showTax && view.interState ? <TotalRow label="IGST" value={pdfMoney(t.igstPaise)} /> : null}
-              {view.showTax && view.showCess ? <TotalRow label="Cess" value={pdfMoney(t.cessPaise)} /> : null}
-              <TotalRow label="Round off" value={pdfSigned(t.roundOffPaise)} />
-              <View style={[s.grandTotal, { backgroundColor: brand }]}>
-                <Text>Total (INR)</Text>
-                <Text>{pdfRupees(t.totalPaise)}</Text>
-              </View>
-              {view.cancelled ? null : (
-                <View style={{ marginTop: 3 }}>
-                  <TotalRow label="Paid" value={pdfMoney(view.paidPaise)} />
-                  <TotalRow label="Balance due" value={pdfMoney(view.amountDuePaise)} bold={view.amountDuePaise > 0} />
-                </View>
-              )}
-            </View>
+          <View style={s.row}>
+            <Cell width={pct(SHEET_LEFT)} textStyle={{ fontSize: 7.5 }}>
+              {sheet.note ?? ""}
+            </Cell>
+            <Cell width={pct(G.d + G.e)} align="center" textStyle={s.bold}>
+              {sheet.subtotalLabel}
+            </Cell>
+            <Cell width={pct(G.f)} align="center" textStyle={s.bold}>
+              {sheet.subtotal}
+            </Cell>
           </View>
 
-          <View style={s.payRow}>
-            <View style={s.payBox}>
-              {view.bank ? (
-                <View>
-                  <Text style={[s.boxLabel, { color: brand }]}>Bank details</Text>
-                  <KeyValue label="Bank" value={view.bank.bankName} />
-                  <KeyValue label="Account name" value={view.bank.accountName} />
-                  <KeyValue label="Account no." value={view.bank.accountNumber} />
-                  <KeyValue label="IFSC" value={view.bank.ifsc} />
-                </View>
-              ) : null}
-              {view.upi ? <KeyValue label="UPI ID" value={view.upi.id} /> : null}
-            </View>
-            {view.upi && upiQr ? (
-              <View style={s.qrBox}>
-                {/* eslint-disable-next-line jsx-a11y/alt-text */}
-                <Image src={upiQr} style={s.qr} />
-                <Text style={{ fontSize: 7, textAlign: "center", marginTop: 2 }}>
-                  {view.upi.due ? "Scan to pay" : "UPI"} {pdfRupees(view.upi.amountPaise)}
-                </Text>
-              </View>
-            ) : null}
-            <View style={s.signBox}>
-              <Text style={s.bold}>{view.signatoryFor}</Text>
-              <Text style={s.signLine}>{view.signatoryLabel}</Text>
-            </View>
-          </View>
+          {sheet.charges.length > 0 ? <BankBlock sheet={sheet} brand={brand} upiQr={upiQr ?? null} /> : null}
+
+          <Closing sheet={sheet} brand={brand} />
+
+          {sheet.cancelNote ? <Text style={s.cancelNote}>{sheet.cancelNote}</Text> : null}
+          {sheet.footer ? <Text style={s.footerNote}>{sheet.footer}</Text> : null}
         </View>
-
-        {view.declaration ? <Text style={s.declaration}>{view.declaration}</Text> : null}
-
-        {view.terms.length > 0 ? (
-          <View style={s.terms}>
-            <Text style={[s.boxLabel, { color: brand }]}>Terms and conditions</Text>
-            {view.terms.map((line, i) => (
-              <Text key={i} style={{ fontSize: 7.8 }}>
-                {line}
-              </Text>
-            ))}
-          </View>
-        ) : null}
-
-        {view.cancelled && view.cancelReason ? (
-          <Text style={{ marginTop: 10, color: "#dc2626" }}>This bill was cancelled. Reason: {view.cancelReason}</Text>
-        ) : null}
-
-        {view.footer ? <Text style={s.footerNote}>{view.footer}</Text> : null}
       </Page>
     </Document>
   );

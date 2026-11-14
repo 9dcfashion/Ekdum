@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { FolderTree, Package, Plus, Upload } from "lucide-react";
+import { FolderTree, Package, Plus, Upload, Zap } from "lucide-react";
 import { EmptyState } from "@/components/shared/empty-state";
 import { FilterSelect, Pagination, SearchInput } from "@/components/shared/list-controls";
 import { PageHeader } from "@/components/shared/page-header";
@@ -143,6 +143,11 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
 
   const actions = canManage ? (
     <>
+      <Button variant="outline" asChild>
+        <Link href="/app/settings/quick-items" title="Buttons for fast billing without a product list">
+          <Zap aria-hidden /> Quick items
+        </Link>
+      </Button>
       <Button variant="outline" asChild>
         <Link href="/app/products/categories">
           <FolderTree aria-hidden /> Categories

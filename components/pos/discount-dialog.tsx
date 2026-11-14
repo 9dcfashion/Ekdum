@@ -106,7 +106,8 @@ export function DiscountDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onClosed: () => void;
+  /** After closing. Return false to let focus go back to the button that opened it (phones). */
+  onClosed: () => boolean | void;
   cart: CartState;
   summary: CartSummary;
   ctx: PosContext;
@@ -116,8 +117,7 @@ export function DiscountDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         onCloseAutoFocus={(e) => {
-          e.preventDefault();
-          onClosed();
+          if (onClosed() !== false) e.preventDefault();
         }}
       >
         <DialogHeader>

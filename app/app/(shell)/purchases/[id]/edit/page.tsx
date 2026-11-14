@@ -1,15 +1,16 @@
 import { notFound, redirect } from "next/navigation";
-import { BillForm } from "@/components/purchases/bill-form";
+import { PurchaseEntry } from "@/components/purchases/purchase-flow";
 import { PageHeader } from "@/components/shared/page-header";
 import { requirePage } from "@/lib/auth/context";
-import { istDateString } from "@/lib/dates";
+import { formatDateTime, istDateString } from "@/lib/dates";
+import { firstIncompleteStep } from "@/lib/purchases/flow";
 import { billToPrefill, prefillToFormValues } from "@/lib/purchases/prefill";
 import { loadBillFormData, signAttachments } from "@/lib/purchases/server";
 import type { VendorOption } from "@/lib/purchases/types";
 import type { PurchaseBill, PurchaseBillItem } from "@/lib/types/db";
 import { uuid } from "@/lib/validation/common";
 
-export const metadata = { title: "Edit purchase bill" };
+export const metadata = { title: "Complete purchase" };
 
 export default async function EditPurchasePage({ params }: { params: Promise<{ id: string }> }) {
   const ctx = await requirePage("purchases.create");
@@ -18,18 +19,21 @@ export default async function EditPurchasePage({ params }: { params: Promise<{ i
 
   const { data: billRow } = await ctx.supabase
     .from("purchase_bills")
-    .select("*, vendor:vendors(id, name, gstin, state_code)")
+    .select("*, created_by, vendor:vendors(id, name, gstin, state_code, phone)")
     .eq("id", id)
     .eq("business_id", ctx.business.id)
     .maybeSingle();
-  const bill = billRow as (PurchaseBill & { vendor: VendorOption | null }) | null;
+  const bill = billRow as (PurchaseBill & { created_by: string | null; vendor: VendorOption | null }) | null;
   if (!bill) notFound();
   if (bill.status !== "draft") redirect(`/app/purchases/${id}`);
 
-  const [{ data: itemRows }, data, attachmentUrls] = await Promise.all([
+  const [{ data: itemRows }, data, attachmentUrls, { data: profile }] = await Promise.all([
     ctx.supabase.from("purchase_bill_items").select("*").eq("purchase_bill_id", id).order("line_no"),
     loadBillFormData(ctx),
     signAttachments(ctx, bill.attachment_paths),
+    bill.created_by
+      ? ctx.supabase.from("profiles").select("full_name, email").eq("id", bill.created_by).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
   const items = (itemRows ?? []) as PurchaseBillItem[];
 
@@ -40,21 +44,28 @@ export default async function EditPurchasePage({ params }: { params: Promise<{ i
   const fallbackOutlet = outlets.find((o) => o.id === bill.outlet_id) ?? outlets[0];
   if (!fallbackOutlet) redirect(`/app/purchases/${id}`);
 
+  const defaults = prefillToFormValues(billToPrefill({ ...bill, outlet_id: fallbackOutlet.id }, items), {
+    outletId: fallbackOutlet.id,
+    isInterState: bill.is_inter_state,
+  });
+  const who = profile as { full_name: string | null; email: string | null } | null;
+  const savedBy = who?.full_name || who?.email || "a team member";
+  const complete = firstIncompleteStep(defaults) === 4;
+
   return (
     <>
       <PageHeader
-        title="Edit draft purchase bill"
-        description="Nothing touches stock until you post it."
+        title={complete ? "Edit draft purchase" : "Complete purchase"}
+        description={`Saved by ${savedBy} on ${formatDateTime(bill.created_at)}. Nothing changes in stock until it is added to stock.`}
         backHref={`/app/purchases/${id}`}
+        className="mb-4"
       />
-      <BillForm
+      <PurchaseEntry
         businessId={ctx.business.id}
-        defaults={prefillToFormValues(billToPrefill({ ...bill, outlet_id: fallbackOutlet.id }, items), {
-          outletId: fallbackOutlet.id,
-          isInterState: bill.is_inter_state,
-        })}
+        defaults={defaults}
         outlets={outlets}
         vendors={vendors}
+        recentVendorIds={data.recentVendorIds}
         units={data.units}
         gstRates={data.gstRates}
         attachmentUrls={attachmentUrls}
@@ -62,6 +73,7 @@ export default async function EditPurchasePage({ params }: { params: Promise<{ i
         canPost={ctx.can("purchases.post")}
         canCreateVendor={ctx.can("vendors.manage")}
         canCreateProduct={ctx.can("products.manage")}
+        exitHref={`/app/purchases/${id}`}
       />
     </>
   );

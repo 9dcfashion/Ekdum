@@ -12,6 +12,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   mock: "Test mode (mock)",
   resend: "Resend",
   meta: "Meta WhatsApp Cloud API",
+  evolution: "Evolution API (self-hosted)",
 };
 
 /**

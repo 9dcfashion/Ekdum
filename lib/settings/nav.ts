@@ -8,6 +8,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   { href: "/app/settings/branding", label: "Branding" },
   { href: "/app/settings/payments", label: "Bank and UPI" },
   { href: "/app/settings/invoice", label: "Invoice settings" },
+  { href: "/app/settings/quick-items", label: "Quick billing items" },
   { href: "/app/settings/outlets", label: "Outlets" },
   { href: "/app/settings/series", label: "Invoice series" },
   { href: "/app/settings/devices", label: "POS devices" },

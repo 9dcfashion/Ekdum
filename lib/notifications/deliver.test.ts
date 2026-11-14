@@ -136,6 +136,40 @@ describe("deliverJob: WhatsApp", () => {
     expect(message.customerName).toBe("Customer");
   });
 
+  it("does not render a PDF for providers that link to it", async () => {
+    let renders = 0;
+    const { deps, whatsapps } = fakes({
+      renderPdf: async () => {
+        renders += 1;
+        return Buffer.from("%PDF-fake");
+      },
+    });
+    await deliverJob(whatsappJob(), deps);
+    expect(renders).toBe(0);
+    expect(whatsapps[0].pdf).toBeUndefined();
+  });
+
+  it("attaches the rendered PDF for providers that upload it", async () => {
+    const { deps, whatsapps } = fakes();
+    deps.whatsapp = { ...deps.whatsapp, attachesPdf: true, sendInvoice: deps.whatsapp.sendInvoice };
+    const outcome = await deliverJob(whatsappJob(), deps);
+    expect(outcome).toEqual({ success: true, messageId: "wa-1", permanent: false });
+    expect(whatsapps[0].pdf?.toString()).toBe("%PDF-fake");
+    expect(whatsapps[0].pdfFilename).toBe("Invoice-A-2627-00042.pdf");
+  });
+
+  it("retries later when rendering the PDF for an uploading provider fails", async () => {
+    const { deps, whatsapps } = fakes({
+      renderPdf: async () => {
+        throw new Error("render exploded");
+      },
+    });
+    deps.whatsapp = { ...deps.whatsapp, attachesPdf: true, sendInvoice: deps.whatsapp.sendInvoice };
+    const outcome = await deliverJob(whatsappJob(), deps);
+    expect(outcome).toEqual({ success: false, error: "render exploded", permanent: false });
+    expect(whatsapps).toHaveLength(0);
+  });
+
   it("does not send when the customer has not opted in (checked at send time)", async () => {
     const { deps, whatsapps } = fakes({ optedIn: false });
     const outcome = await deliverJob(whatsappJob(), deps);

@@ -133,7 +133,8 @@ export function ParkedDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onClosed: () => void;
+  /** After closing. Return false to let focus go back to the button that opened it (phones). */
+  onClosed: () => boolean | void;
   store: ParkedStore;
   currentBillInUse: boolean;
   onResume: (bill: ParkedBill) => void;
@@ -144,8 +145,7 @@ export function ParkedDialog({
       <DialogContent
         className="sm:max-w-md"
         onCloseAutoFocus={(e) => {
-          e.preventDefault();
-          onClosed();
+          if (onClosed() !== false) e.preventDefault();
         }}
       >
         <DialogHeader>

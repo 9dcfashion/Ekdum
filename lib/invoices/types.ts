@@ -1,6 +1,10 @@
 import type { Business, Outlet, SalesInvoice, SalesInvoiceItem, SalesPayment } from "@/lib/types/db";
 
-/** Only the business columns an invoice document prints (plus the two delivery switches the worker reads). */
+/**
+ * Only the business columns an invoice document prints (plus the two delivery switches the worker reads).
+ * `invoice_tagline` and `signatory_label` are optional so a seller snapshot saved on a POS device before
+ * they existed still prints (with no tagline and "Authorised Signatory").
+ */
 export type InvoiceBusiness = Pick<
   Business,
   | "id"
@@ -25,7 +29,12 @@ export type InvoiceBusiness = Pick<
   | "invoice_footer"
   | "hsn_digits"
 > &
-  Partial<Pick<Business, "default_print_format" | "notify_email_enabled" | "notify_whatsapp_enabled">>;
+  Partial<
+    Pick<
+      Business,
+      "invoice_tagline" | "signatory_label" | "default_print_format" | "notify_email_enabled" | "notify_whatsapp_enabled"
+    >
+  >;
 
 export type InvoiceOutlet = Pick<
   Outlet,

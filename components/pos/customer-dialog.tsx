@@ -244,7 +244,8 @@ export function CustomerDialog({
   settings: PosSettings;
   services: Pick<PosServices, "searchCustomers" | "createCustomer">;
   onCart: (cart: CartState) => void;
-  onClosed: () => void;
+  /** After closing. Return false to let focus go back to the button that opened it (phones). */
+  onClosed: () => boolean | void;
 }) {
   const customer = cart.customer;
   const isB2b = cart.supplyType === "b2b";
@@ -270,9 +271,8 @@ export function CustomerDialog({
       <DialogContent
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-xl"
         onCloseAutoFocus={(e) => {
-          e.preventDefault();
           setLookup(false);
-          onClosed();
+          if (onClosed() !== false) e.preventDefault();
         }}
       >
         <DialogHeader>

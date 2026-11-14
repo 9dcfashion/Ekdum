@@ -1,14 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useAppRouter as useRouter } from "@/lib/use-app-router";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { PackageCheck } from "lucide-react";
+import { PackageCheck, Sparkles } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { Field, MoneyInput, NativeSelect } from "@/components/shared/field";
 import { SubmitButton } from "@/components/shared/submit-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { addQuickItemPackAction } from "@/lib/quick-items/actions";
 import { useAction } from "@/lib/use-action";
 import { quickProductSchema, type QuickProductInput } from "@/lib/validation/onboarding";
 import { finishOnboardingAction, quickAddProductAction } from "../actions";
@@ -20,6 +21,8 @@ export function ProductsStep({ data }: { data: WizardData }) {
   const add = useAction();
   const finish = useAction();
   const [products, setProducts] = useState(data.products);
+  const pack = useAction();
+  const [packAdded, setPackAdded] = useState(0);
   const [destination, setDestination] = useState("/app");
   const chargesGst = data.business!.gst_scheme === "regular";
 
@@ -48,6 +51,34 @@ export function ProductsStep({ data }: { data: WizardData }) {
 
   return (
     <div>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 font-medium">
+            <Sparkles className="size-4 text-primary" aria-hidden /> Selling jewellery?
+          </p>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            {packAdded
+              ? `Done. ${packAdded} quick buttons (Necklace, Finger Ring, Bracelet, Earrings…) are ready on the billing screen. You can change them later in Settings.`
+              : "Add quick buttons for Necklace, Finger Ring, Bracelet, Earrings and more, at GST 3% and HSN 7117. Staff then type only the rate."}
+          </p>
+        </div>
+        {!packAdded ? (
+          <SubmitButton
+            type="button"
+            variant="outline"
+            pending={pack.pending}
+            onClick={() =>
+              pack.run(() => addQuickItemPackAction({ pack: "jewellery" }), {
+                success: (r) => (r.added ? `Added ${r.added} quick items` : "Already added"),
+                onSuccess: (r) => setPackAdded(r.added || 1),
+              })
+            }
+          >
+            Add jewellery buttons
+          </SubmitButton>
+        ) : null}
+      </div>
+
       <form
         noValidate
         className="grid items-start gap-4 sm:grid-cols-6"

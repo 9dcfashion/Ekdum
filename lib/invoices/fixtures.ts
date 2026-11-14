@@ -1,5 +1,6 @@
 /** Sample invoices for unit tests (view model, PDF, notifications). Not used at runtime. */
 import type { DocumentType } from "@/lib/gst/config";
+import { amountInWords } from "@/lib/gst/words";
 import type { SalesInvoice } from "@/lib/types/db";
 import type { InvoiceBundle, InvoiceBusiness, InvoiceItemRow, InvoiceOutlet, InvoicePaymentRow } from "./types";
 
@@ -101,7 +102,8 @@ export function fixtureBundle(options: FixtureOptions = {}): InvoiceBundle {
 
   const sum = (key: "taxable_paise" | "cgst_paise" | "sgst_paise" | "igst_paise" | "cess_paise" | "total_paise") =>
     items.reduce((total, item) => total + item[key], 0);
-  const total = sum("total_paise");
+  const roundOff = options.invoice?.round_off_paise ?? 0;
+  const total = options.invoice?.total_paise ?? sum("total_paise") + roundOff;
 
   const invoice: SalesInvoice = {
     id: "44444444-4444-4444-8444-444444444444",
@@ -135,10 +137,10 @@ export function fixtureBundle(options: FixtureOptions = {}): InvoiceBundle {
     sgst_paise: sum("sgst_paise"),
     igst_paise: sum("igst_paise"),
     cess_paise: sum("cess_paise"),
-    round_off_paise: 0,
+    round_off_paise: roundOff,
     total_paise: total,
     amount_due_paise: 0,
-    amount_in_words: "Rupees Two Thousand Three Hundred Sixty Only",
+    amount_in_words: amountInWords(total),
     notes: null,
     status: "posted",
     cancelled_at: null,
@@ -172,4 +174,79 @@ export function fixtureBundle(options: FixtureOptions = {}): InvoiceBundle {
     }),
     outlet: options.outlet === null ? null : fixtureOutlet(options.outlet),
   };
+}
+
+/** One tax-exclusive line at 3% GST (intra-state), priced like the jewellery wholesaler's bill. */
+function referenceItem(lineNo: number, description: string, quantity: number, ratePaise: number): InvoiceItemRow {
+  const taxable = quantity * ratePaise;
+  const tax = Math.round(taxable * 0.03);
+  return {
+    id: `33333333-3333-4333-8333-${String(100 + lineNo).padStart(12, "0")}`,
+    line_no: lineNo,
+    description,
+    hsn_code: "7117",
+    quantity,
+    unit_code: "PCS",
+    unit_price_paise: ratePaise,
+    price_includes_tax: false,
+    discount_paise: 0,
+    taxable_paise: taxable,
+    gst_rate: 3,
+    cess_rate: 0,
+    cgst_paise: Math.floor(tax / 2),
+    sgst_paise: tax - Math.floor(tax / 2),
+    igst_paise: 0,
+    cess_paise: 0,
+    total_paise: taxable + tax,
+  };
+}
+
+/**
+ * The bill a jewellery wholesaler in Mumbai already prints from Excel (the layout the A4
+ * template copies): two lines at 3% GST to a registered buyer in the same state.
+ */
+export function referenceBundle(options: FixtureOptions = {}): InvoiceBundle {
+  return fixtureBundle({
+    outlet: null,
+    items: [referenceItem(1, "NECKLACE", 1000, 5000), referenceItem(2, "BRACELETS", 800, 5000)],
+    ...options,
+    invoice: {
+      invoice_number: "A/2526/00163",
+      financial_year: "2526",
+      invoice_date: "2026-03-22",
+      seller_gstin: "27ACAPV1182E1ZP",
+      customer_name: "Agrawal Gems",
+      customer_phone: null,
+      customer_email: null,
+      customer_gstin: "27AADFA1321M1ZQ",
+      customer_address: "187/193, Kapadia building,shop no 117,Agiary 2nd Lane\nZaveri Bazar, Mumbai-27",
+      customer_pincode: null,
+      supply_type: "b2b",
+      ...options.invoice,
+    },
+    business: {
+      legal_name: "D C FASHION JEWELLERY",
+      trade_name: null,
+      address_line1: "2ND FLOOR ,SHOP NO 11, CRYSTAL PLAZA,ANAND ROAD",
+      address_line2: "MALAD WEST",
+      city: "MUMBAI",
+      pincode: "400064",
+      phone: null,
+      email: null,
+      brand_color: "#E00000",
+      invoice_tagline: "Wholesale Dealer in: Stone Settled Exclusive Fancy Jewellery",
+      signatory_label: "Proprietor",
+      bank_name: "KOTAK MAHINDRA BANK, #1138 NEVILLA HOUSE , VASAI ROAD EAST, GHOKHIVARA-401208",
+      bank_account_name: null,
+      bank_account_number: "2512384715",
+      ifsc: "KKBK0001347",
+      upi_id: null,
+      invoice_terms:
+        "This is to certify that we have valid Registration Under GST\n" +
+        "If Bill not paid within Due date,interest will be charged @\n" +
+        "Only Mumbai Courts will have Jurisdiction",
+      invoice_footer: null,
+      ...options.business,
+    },
+  });
 }

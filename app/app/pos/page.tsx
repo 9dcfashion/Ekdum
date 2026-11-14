@@ -8,7 +8,7 @@ import { buildPosContext } from "@/lib/pos/cart";
 import { loadPosCatalog } from "@/lib/pos/load";
 import { POS_SHELL_HEADER } from "@/lib/offline/protocol";
 import type { SellerSnapshot } from "@/lib/offline/receipt";
-import type { CatalogProduct, PosSettings } from "@/lib/pos/types";
+import type { CatalogProduct, PosSettings, QuickItem } from "@/lib/pos/types";
 import { PosClient } from "./pos-client";
 
 export default async function PosPage() {
@@ -26,7 +26,7 @@ export default async function PosPage() {
 
   // The offline shell (the service worker asks for it with a header) carries no products: the till then runs from its saved catalog.
   const shell = (await headers()).get(POS_SHELL_HEADER) === "1";
-  const [seriesResult, catalog] = await Promise.all([
+  const [seriesResult, catalog, ratesResult, unitsResult, quickResult] = await Promise.all([
     ctx.supabase
       .from("invoice_series")
       .select("id")
@@ -37,6 +37,17 @@ export default async function PosPage() {
       .eq("is_active", true)
       .limit(1),
     shell ? Promise.resolve<CatalogProduct[]>([]) : loadPosCatalog(ctx, outlet.id),
+    // For manual items (things not in the product list). Small reference tables, safe to send to the till.
+    ctx.supabase.from("gst_rates").select("rate").eq("is_active", true).order("sort_order", { ascending: true }),
+    ctx.supabase.from("units").select("code, name, allow_decimal").eq("is_active", true).order("sort_order", { ascending: true }),
+    // Preset "quick item" buttons (Settings → Quick billing items). Small, and needed offline too, so the shell loads them as well.
+    ctx.supabase
+      .from("quick_items")
+      .select("id, name, gst_rate, hsn_code, unit_code, price_includes_tax, default_rate_paise")
+      .eq("business_id", ctx.business.id)
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true }),
   ]);
   if (seriesResult.error) throw new Error(`Could not check the bill number series: ${seriesResult.error.message}`);
 
@@ -75,6 +86,29 @@ export default async function PosPage() {
     );
   }
 
+  const units = (unitsResult.data ?? []) as PosSettings["units"];
+  const decimalUnits = new Set(units.filter((u) => u.allow_decimal).map((u) => u.code));
+  // A failed read (e.g. the quick items table is not there yet) must never stop billing: the till just shows no quick items.
+  const quickRows = (quickResult.error ? [] : (quickResult.data ?? [])) as Array<{
+    id: string;
+    name: string;
+    gst_rate: number | string;
+    hsn_code: string | null;
+    unit_code: string;
+    price_includes_tax: boolean;
+    default_rate_paise: number | string | null;
+  }>;
+  const quickItems: QuickItem[] = quickRows.map((q) => ({
+    id: q.id,
+    name: q.name,
+    gstRate: Number(q.gst_rate) || 0,
+    hsnCode: q.hsn_code,
+    unitCode: q.unit_code,
+    allowDecimal: decimalUnits.has(q.unit_code),
+    priceIncludesTax: q.price_includes_tax,
+    defaultRatePaise: q.default_rate_paise === null ? null : Number(q.default_rate_paise) || null,
+  }));
+
   const context = buildPosContext({
     business: ctx.business,
     outlet,
@@ -83,6 +117,7 @@ export default async function PosPage() {
     canOverridePrice: ctx.can("sales.price_override"),
   });
   const settings: PosSettings = {
+    businessId: ctx.business.id,
     businessName: ctx.business.trade_name || ctx.business.legal_name,
     outletName: outlet.name,
     upiId: ctx.business.upi_id,
@@ -92,6 +127,9 @@ export default async function PosPage() {
     canManageCustomers: ctx.can("customers.manage") && ctx.can("customers.view"),
     emailReceiptsEnabled: ctx.business.notify_email_enabled,
     whatsappReceiptsEnabled: ctx.business.notify_whatsapp_enabled,
+    gstRates: ((ratesResult.data ?? []) as Array<{ rate: number }>).map((r) => Number(r.rate)),
+    units,
+    quickItems,
   };
 
   const b = ctx.business;
@@ -119,6 +157,8 @@ export default async function PosPage() {
       upi_id: b.upi_id,
       invoice_terms: b.invoice_terms,
       invoice_footer: b.invoice_footer,
+      invoice_tagline: b.invoice_tagline,
+      signatory_label: b.signatory_label,
       hsn_digits: b.hsn_digits,
     },
     outlet: {

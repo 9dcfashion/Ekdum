@@ -1,4 +1,5 @@
 import { Logo, PoweredBy } from "@/components/brand";
+import { BottomNav } from "@/components/app/bottom-nav";
 import { SidebarNav } from "@/components/app/sidebar-nav";
 import { BusinessSwitcher, MobileNav, OutletSwitcher, UserMenu, type ShellData } from "@/components/app/topbar";
 import { requireContext } from "@/lib/auth/context";
@@ -44,7 +45,9 @@ export default async function ShellLayout({ children }: { children: React.ReactN
             <UserMenu data={data} />
           </div>
         </header>
-        <main className="mx-auto w-full max-w-7xl flex-1 px-3 py-5 sm:px-5">{children}</main>
+        {/* Bottom padding on phones keeps content clear of the bottom bar. */}
+        <main className="mx-auto w-full max-w-7xl flex-1 px-3 pt-5 pb-24 sm:px-5 lg:pb-5">{children}</main>
+        <BottomNav data={data} />
       </div>
     </div>
   );

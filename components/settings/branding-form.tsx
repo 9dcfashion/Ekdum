@@ -7,6 +7,7 @@ import { MiniInvoicePreview } from "@/components/invoice/mini-preview";
 import { Field } from "@/components/shared/field";
 import { SubmitButton } from "@/components/shared/submit-button";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import type { DocumentType } from "@/lib/gst/config";
 import { cropToSquare } from "@/lib/images";
 import { BUCKETS, UPLOAD_LIMITS, logoUrl as publicLogoUrl, storagePath } from "@/lib/storage";
@@ -27,23 +28,33 @@ export interface PreviewBusiness {
   documentType: DocumentType;
   prefix: string;
   footer: string | null;
+  /** The line under the shop name on the bill. */
+  tagline?: string | null;
+  /** The title under "For {shop}". */
+  signatoryLabel?: string | null;
 }
 
 export function BrandingForm({
   business,
   initialLogoPath,
   initialColor,
+  initialTagline,
 }: {
   business: PreviewBusiness;
   initialLogoPath: string | null;
   initialColor: string;
+  initialTagline: string | null;
 }) {
   const { run, pending } = useAction();
   const fileRef = useRef<HTMLInputElement>(null);
   const [color, setColor] = useState(initialColor);
   const [logoPath, setLogoPath] = useState<string | null>(initialLogoPath);
   const [uploading, setUploading] = useState(false);
-  const dirty = color.toLowerCase() !== initialColor.toLowerCase() || logoPath !== initialLogoPath;
+  const [tagline, setTagline] = useState(initialTagline ?? "");
+  const dirty =
+    color.toLowerCase() !== initialColor.toLowerCase() ||
+    logoPath !== initialLogoPath ||
+    tagline.trim() !== (initialTagline ?? "").trim();
 
   async function onFile(file: File | undefined) {
     if (!file) return;
@@ -75,7 +86,9 @@ export function BrandingForm({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        run(() => saveBrandingSettingsAction({ logo_path: logoPath, brand_color: color }), { success: "Branding saved" });
+        run(() => saveBrandingSettingsAction({ logo_path: logoPath, brand_color: color, invoice_tagline: tagline }), {
+          success: "Branding saved",
+        });
       }}
     >
       <div className="grid gap-8 lg:grid-cols-2">
@@ -143,8 +156,21 @@ export function BrandingForm({
               </label>
             </div>
           </Field>
+          <Field
+            label="Line under your shop name"
+            htmlFor="invoice_tagline"
+            hint="Optional. What you deal in, printed under the shop name on A4 bills and receipts."
+          >
+            <Input
+              id="invoice_tagline"
+              maxLength={120}
+              placeholder="e.g. Wholesale Dealer in: Fancy Jewellery"
+              value={tagline}
+              onChange={(e) => setTagline(e.target.value)}
+            />
+          </Field>
           <p className="text-xs text-muted-foreground">
-            The new logo and colour appear on bills you print or send from now on, including reprints of older bills.
+            The new logo, colour and line appear on bills you print or send from now on, including reprints of older bills.
           </p>
         </div>
 
@@ -160,6 +186,8 @@ export function BrandingForm({
             documentType={business.documentType}
             prefix={business.prefix}
             footer={business.footer}
+            tagline={tagline}
+            signatoryLabel={business.signatoryLabel}
           />
         </div>
       </div>

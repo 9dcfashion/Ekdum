@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ReceiptText, ScanBarcode, Undo2 } from "lucide-react";
+import { Camera, PackagePlus, ReceiptText, ScanBarcode, Undo2 } from "lucide-react";
 import { EmptyState } from "@/components/shared/empty-state";
 import { FilterDate, FilterSelect, Pagination, SearchInput } from "@/components/shared/list-controls";
 import { PageHeader } from "@/components/shared/page-header";
@@ -48,6 +48,8 @@ interface Filters {
   status: string;
   outletIds: string[];
   dues: boolean;
+  /** Only bills with at least one item that is not in the product list. */
+  manual: boolean;
   page: number;
 }
 
@@ -73,6 +75,7 @@ function readFilters(sp: SearchParams, ctx: AppContext): Filters {
     status: param(sp, "status"),
     outletIds: allowed.includes(outlet) ? [outlet] : allowed,
     dues: param(sp, "dues") === "1",
+    manual: param(sp, "items") === "manual",
     page: pageParam(sp),
   };
 }
@@ -140,6 +143,14 @@ function FilterBar({ ctx, filters, tab }: { ctx: AppContext; filters: Filters; t
                 { value: "1", label: "Has dues" },
               ]}
             />
+            <FilterSelect
+              param="items"
+              label="Items"
+              options={[
+                { value: "", label: "Any items" },
+                { value: "manual", label: "Items not in product list" },
+              ]}
+            />
           </>
         ) : null}
         {ctx.outlets.length > 1 ? (
@@ -164,7 +175,9 @@ async function BillsTab({ ctx, filters, hasFilters }: { ctx: AppContext; filters
   let query = ctx.supabase
     .from("sales_invoices")
     .select(
-      "id, invoice_number, invoice_date, document_type, supply_type, customer_name, customer_phone, total_paise, amount_due_paise, status, source, created_by, outlet_id",
+      "id, invoice_number, invoice_date, document_type, supply_type, customer_name, customer_phone, total_paise, amount_due_paise, status, source, created_by, outlet_id" +
+        // Inner join keeps only bills that have a manual line; it is not used for display.
+        (filters.manual ? ", manual_lines:sales_invoice_items!inner(id)" : ""),
       { count: "exact" },
     )
     .eq("business_id", ctx.business.id)
@@ -173,6 +186,7 @@ async function BillsTab({ ctx, filters, hasFilters }: { ctx: AppContext; filters
   if (filters.to) query = query.lte("invoice_date", filters.to);
   if (filters.status === "posted" || filters.status === "cancelled") query = query.eq("status", filters.status);
   if (filters.dues) query = query.gt("amount_due_paise", 0).eq("status", "posted");
+  if (filters.manual) query = query.is("manual_lines.product_id", null);
   const term = ilikeTerm(filters.q);
   if (term) {
     const digits = term.replace(/\D/g, "");
@@ -186,8 +200,16 @@ async function BillsTab({ ctx, filters, hasFilters }: { ctx: AppContext; filters
     .range(start, end);
   if (error) throw new Error(`Could not load bills: ${error.message}`);
 
-  const rows = (data ?? []) as InvoiceRow[];
-  const names = await loadNames(ctx, rows.map((r) => r.created_by));
+  const rows = (data ?? []) as unknown as InvoiceRow[];
+  const ids = rows.map((r) => r.id);
+  const [names, manualResult, photoResult] = await Promise.all([
+    loadNames(ctx, rows.map((r) => r.created_by)),
+    ids.length ? ctx.supabase.from("sales_invoice_items").select("invoice_id").in("invoice_id", ids).is("product_id", null) : Promise.resolve({ data: [] }),
+    ids.length ? ctx.supabase.from("sales_invoice_photos").select("invoice_id").in("invoice_id", ids) : Promise.resolve({ data: [] }),
+  ]);
+  const withManual = new Set(((manualResult.data ?? []) as Array<{ invoice_id: string }>).map((r) => r.invoice_id));
+  const photoCount = new Map<string, number>();
+  for (const r of (photoResult.data ?? []) as Array<{ invoice_id: string }>) photoCount.set(r.invoice_id, (photoCount.get(r.invoice_id) ?? 0) + 1);
   const outletNames = new Map(ctx.outlets.map((o) => [o.id, o.name]));
   const showOutlet = ctx.outlets.length > 1;
   const canBill = ctx.can("sales.create");
@@ -233,9 +255,24 @@ async function BillsTab({ ctx, filters, hasFilters }: { ctx: AppContext; filters
               <TableRow key={r.id} className={r.status === "cancelled" ? "text-muted-foreground" : undefined}>
                 <TableCell className="tabular whitespace-nowrap">{formatDate(r.invoice_date)}</TableCell>
                 <TableCell className="tabular whitespace-nowrap">
-                  <Link href={`/app/sales/${r.id}`} className="font-medium text-primary underline-offset-4 hover:underline">
-                    {r.invoice_number}
-                  </Link>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Link href={`/app/sales/${r.id}`} className="font-medium text-primary underline-offset-4 hover:underline">
+                      {r.invoice_number}
+                    </Link>
+                    {withManual.has(r.id) ? (
+                      <span title="Has items not in the product list" className="text-indigo-600">
+                        <PackagePlus className="size-3.5" aria-hidden />
+                        <span className="sr-only">Has items not in the product list</span>
+                      </span>
+                    ) : null}
+                    {photoCount.get(r.id) ? (
+                      <span title={`${photoCount.get(r.id)} photo(s) of items given`} className="inline-flex items-center gap-0.5 text-xs text-muted-foreground">
+                        <Camera className="size-3.5" aria-hidden />
+                        {photoCount.get(r.id)}
+                        <span className="sr-only">photos of items given</span>
+                      </span>
+                    ) : null}
+                  </span>
                 </TableCell>
                 <TableCell className="max-w-56">
                   <p className="truncate">{r.customer_name || "Walk-in"}</p>
@@ -359,7 +396,7 @@ export default async function SalesPage({ searchParams }: { searchParams: Promis
   const sp = await searchParams;
   const tab = param(sp, "tab") === "credit-notes" ? "credit-notes" : "bills";
   const filters = readFilters(sp, ctx);
-  const hasFilters = ["q", "range", "status", "outlet", "dues"].some((key) => param(sp, key) !== "");
+  const hasFilters = ["q", "range", "status", "outlet", "dues", "items"].some((key) => param(sp, key) !== "");
   const ownOnly = !ctx.can("sales.view_all");
 
   return (

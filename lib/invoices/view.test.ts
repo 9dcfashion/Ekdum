@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { COMPOSITION_DECLARATION } from "@/lib/gst/config";
-import { fixtureBundle, fixtureItem } from "./fixtures";
+import { fixtureBundle, fixtureItem, referenceBundle, type FixtureOptions } from "./fixtures";
+import { buildInvoiceSheet, displayPhone, sheetColumns, splitWords, upiIdLines } from "./sheet";
 import { isPublicTokenShape, isUuid } from "./token";
-import { buildInvoiceView } from "./view";
+import { buildInvoiceView, preTaxPricing } from "./view";
 
 describe("buildInvoiceView", () => {
   it("builds an intra-state tax invoice with CGST and SGST", () => {
@@ -204,6 +205,251 @@ describe("buildInvoiceView", () => {
     expect(view.showDiscount).toBe(true);
     expect(view.paidPaise).toBe(136000);
     expect(view.payments[0]).toMatchObject({ label: "UPI", reference: "UTR123", date: "12/11/2026" });
+  });
+});
+
+const sheetOf = (options: FixtureOptions = {}) => buildInvoiceSheet(buildInvoiceView(fixtureBundle(options)));
+const columnKeys = (options: FixtureOptions = {}) => sheetColumns(buildInvoiceView(fixtureBundle(options))).map((c) => c.key);
+
+/** 18% line (intra or inter) priced tax-exclusive: taxable `taxable`, `qty` units. */
+function taxLine(lineNo: number, rate: number, taxable: number, inter = false, overrides: Parameters<typeof fixtureItem>[2] = {}) {
+  const tax = Math.round((taxable * rate) / 100);
+  return fixtureItem(lineNo, inter ? "inter" : "intra", {
+    price_includes_tax: false,
+    unit_price_paise: taxable / 2,
+    gst_rate: rate,
+    taxable_paise: taxable,
+    cgst_paise: inter ? 0 : Math.floor(tax / 2),
+    sgst_paise: inter ? 0 : tax - Math.floor(tax / 2),
+    igst_paise: inter ? tax : 0,
+    total_paise: taxable + tax,
+    ...overrides,
+  });
+}
+
+describe("A4 sheet: the shopkeeper's boxed bill", () => {
+  it("lays out the jeweller's reference bill like the original", () => {
+    const sheet = buildInvoiceSheet(buildInvoiceView(referenceBundle()));
+    expect(sheet.title).toBe("TAX INVOICE");
+    expect(sheet.copyLabel).toBe("Original for Recipient");
+    expect(sheet.shopName).toBe("D C FASHION JEWELLERY");
+    expect(sheet.tagline).toBe("Wholesale Dealer in: Stone Settled Exclusive Fancy Jewellery");
+    expect(sheet.addressRow).toBe(
+      "2ND FLOOR ,SHOP NO 11, CRYSTAL PLAZA,ANAND ROAD, MALAD WEST, MUMBAI, Maharashtra (27), 400064",
+    );
+    expect(sheet.parties).toEqual([
+      { left: { text: "Details of Buyer : Agrawal Gems" }, right: { text: "GSTIN : 27ACAPV1182E1ZP", accent: true } },
+      { left: { text: "187/193, Kapadia building,shop no 117,Agiary 2nd Lane" }, right: { text: "Invoice No: A/2526/00163" } },
+      { left: { text: "Zaveri Bazar, Mumbai-27" }, right: { text: "Invoice Date: 22/03/2026" } },
+      { left: { text: "State: Maharashtra (27)" }, right: { text: "Place of Supply: Maharashtra (27)" } },
+      { left: { text: "GSTIN: 27AADFA1321M1ZQ" }, right: { text: "Reverse charge(Y/N): No" } },
+    ]);
+    expect(sheet.columns.map((c) => c.label)).toEqual(["Sr.No", "Description of Goods", "HSN Code", "Qty", "Rate", "Amount"]);
+    expect(sheet.columns.reduce((sum, c) => sum + c.width, 0)).toBeCloseTo(100, 6);
+    expect(sheet.rows.map((r) => r.cells)).toEqual([
+      ["1", "NECKLACE", "7117", "1,000", "50.00", "50,000.00"],
+      ["2", "BRACELETS", "7117", "800", "50.00", "40,000.00"],
+    ]);
+    expect(sheet.subtotalLabel).toBe("Total Taxable Amount");
+    expect(sheet.subtotal).toBe("90,000.00");
+    // SGST and CGST at half the rate, then the unused IGST row with the full rate and no amount.
+    expect(sheet.charges).toEqual([
+      { label: "Add SGST", rate: "1.5%", amount: "1,350.00" },
+      { label: "Add CGST", rate: "1.5%", amount: "1,350.00" },
+      { label: "Add IGST", rate: "3%", amount: "" },
+    ]);
+    expect(sheet.bank).toEqual({
+      lines: [
+        "BANK DETAIL:- KOTAK MAHINDRA BANK, #1138 NEVILLA HOUSE , VASAI ROAD EAST, GHOKHIVARA-401208",
+        "A/C NO. 2512384715 / IFSC: KKBK0001347",
+      ],
+      upiId: null,
+    });
+    expect(sheet.wordsLabel).toEqual(["Tax", "Amount"]);
+    expect(sheet.words.join(" ")).toBe("RUPEES TWO THOUSAND SEVEN HUNDRED ONLY");
+    expect(sheet.grandTotal).toBe("92,700.00");
+    expect(sheet.totalInWords).toBe("RUPEES NINETY-TWO THOUSAND SEVEN HUNDRED ONLY");
+    expect(sheet.balanceDue).toBeNull();
+    expect(sheet.terms).toEqual([
+      "1) This is to certify that we have valid Registration Under GST",
+      "2) If Bill not paid within Due date,interest will be charged @",
+      "3) Only Mumbai Courts will have Jurisdiction",
+    ]);
+    expect(sheet.signatoryFor).toBe("For D C FASHION JEWELLERY");
+    expect(sheet.signatoryLabel).toBe("Proprietor");
+    expect(sheet.footer).toBeNull();
+    expect(sheet.cancelNote).toBeNull();
+  });
+
+  it("prints exactly six columns on a single-rate intra-state bill, with pre-tax rates that add up", () => {
+    const view = buildInvoiceView(fixtureBundle());
+    const sheet = buildInvoiceSheet(view);
+    expect(sheet.columns.map((c) => c.key)).toEqual(["sr", "description", "hsn", "qty", "rate", "amount"]);
+    // ₹590 incl. 18% GST → ₹500 before tax; Amount is the taxable value.
+    expect(sheet.rows[0].cells).toEqual(["1", "Basmati Rice 5kg pack 1", "1006", "2", "500.00", "1,000.00"]);
+    expect(view.lines.reduce((sum, l) => sum + l.taxablePaise, 0)).toBe(view.totals.taxablePaise);
+    expect(sheet.charges).toEqual([
+      { label: "Add SGST", rate: "9%", amount: "180.00" },
+      { label: "Add CGST", rate: "9%", amount: "180.00" },
+      { label: "Add IGST", rate: "18%", amount: "" },
+    ]);
+    expect(sheet.addressRow).toBe("12 MG Road, Pune, Maharashtra (27), 411001 \u00B7 Ph: 98765 43210 \u00B7 hello@sharmakirana.example");
+    expect(sheet.bank?.upiId).toBe("sharma@okaxis");
+  });
+
+  it("adds a GST % column and one SGST/CGST pair per rate on a multi-rate bill", () => {
+    const options = { items: [taxLine(1, 5, 100000), taxLine(2, 18, 200000), taxLine(3, 5, 50000)] };
+    expect(columnKeys(options)).toEqual(["sr", "description", "hsn", "qty", "rate", "gst", "amount"]);
+    const sheet = sheetOf(options);
+    expect(sheet.columns.reduce((sum, c) => sum + c.width, 0)).toBeCloseTo(100, 6);
+    expect(sheet.rows.map((r) => r.cells[5])).toEqual(["5%", "18%", "5%"]);
+    expect(sheet.charges).toEqual([
+      { label: "Add SGST", rate: "2.5%", amount: "37.50" },
+      { label: "Add CGST", rate: "2.5%", amount: "37.50" },
+      { label: "Add SGST", rate: "9%", amount: "180.00" },
+      { label: "Add CGST", rate: "9%", amount: "180.00" },
+    ]);
+  });
+
+  it("charges IGST on an inter-state bill", () => {
+    expect(sheetOf({ interState: true }).charges).toEqual([
+      { label: "Add SGST", rate: "9%", amount: "" },
+      { label: "Add CGST", rate: "9%", amount: "" },
+      { label: "Add IGST", rate: "18%", amount: "360.00" },
+    ]);
+    const multi = sheetOf({ interState: true, items: [taxLine(1, 12, 100000, true), taxLine(2, 0.25, 400000, true)] });
+    expect(multi.charges).toEqual([
+      { label: "Add IGST", rate: "0.25%", amount: "10.00" },
+      { label: "Add IGST", rate: "12%", amount: "120.00" },
+      // An empty row so the bank block has room for the UPI QR.
+      null,
+    ]);
+    // Half of 0.25% keeps its third decimal.
+    expect(sheetOf({ items: [taxLine(1, 0.25, 400000)] }).charges[0]).toEqual({ label: "Add SGST", rate: "0.125%", amount: "5.00" });
+  });
+
+  it("adds a Disc. column only when a line has a discount, with the rate and discount before tax", () => {
+    const options = {
+      items: [
+        // ₹590 incl. 18% x 2 = ₹1,180, less ₹118 → ₹1,062 = ₹900 taxable + ₹162 GST.
+        fixtureItem(1, "intra", { discount_paise: 11800, taxable_paise: 90000, cgst_paise: 8100, sgst_paise: 8100, total_paise: 106200 }),
+        taxLine(2, 18, 90000, false, { quantity: 2, unit_price_paise: 50000, discount_paise: 10000 }),
+        taxLine(3, 18, 100000),
+      ],
+    };
+    expect(columnKeys(options)).toEqual(["sr", "description", "hsn", "qty", "rate", "discount", "amount"]);
+    const rows = sheetOf(options).rows.map((r) => r.cells.slice(3));
+    expect(rows).toEqual([
+      ["2", "500.00", "100.00", "900.00"],
+      ["2", "500.00", "100.00", "900.00"],
+      ["2", "500.00", "", "1,000.00"],
+    ]);
+    expect(columnKeys({})).not.toContain("discount");
+  });
+
+  it("works out the pre-tax rate and discount", () => {
+    const base = { quantity: 2, unit_price_paise: 59000, price_includes_tax: true, discount_paise: 0, taxable_paise: 100000, gst_rate: 18, cess_rate: 0 };
+    expect(preTaxPricing(base)).toEqual({ ratePaise: 50000, discountPaise: 0 });
+    expect(preTaxPricing({ ...base, discount_paise: 11800, taxable_paise: 90000 })).toEqual({ ratePaise: 50000, discountPaise: 10000 });
+    // Tax-exclusive prices print as entered.
+    expect(preTaxPricing({ ...base, price_includes_tax: false, unit_price_paise: 50000, discount_paise: 999 })).toEqual({
+      ratePaise: 50000,
+      discountPaise: 999,
+    });
+    // Nothing to back out at 0%.
+    expect(preTaxPricing({ ...base, gst_rate: 0, taxable_paise: 118000 })).toEqual({ ratePaise: 59000, discountPaise: 0 });
+    // Odd quantities round the rate to the paisa: 3 x 33.33 = 99.99 against a taxable value of 100.00.
+    expect(preTaxPricing({ ...base, quantity: 3, unit_price_paise: 3933, taxable_paise: 10000 })).toEqual({ ratePaise: 3333, discountPaise: 0 });
+  });
+
+  it("shows units in the Qty column only when they differ or are not PCS/NOS", () => {
+    expect(sheetOf().rows[0].cells[3]).toBe("2");
+    const mixed = sheetOf({ items: [fixtureItem(1, "intra"), fixtureItem(2, "intra", { unit_code: "NOS" })] });
+    expect(mixed.rows.map((r) => r.cells[3])).toEqual(["2 PCS", "2 NOS"]);
+    const kilos = sheetOf({ items: [fixtureItem(1, "intra", { unit_code: "KGS", quantity: 1.5 })] });
+    expect(kilos.rows[0].cells[3]).toBe("1.5 KGS");
+  });
+
+  it("prints a bill of supply with HSN and GSTIN but no tax rows, and the declaration as the last term", () => {
+    const sheet = sheetOf({ documentType: "bill_of_supply" });
+    expect(sheet.title).toBe("BILL OF SUPPLY");
+    expect(sheet.columns.map((c) => c.key)).toEqual(["sr", "description", "hsn", "qty", "rate", "amount"]);
+    expect(sheet.subtotalLabel).toBe("Total");
+    // Only empty rows beside the bank details (QR height), no tax.
+    expect(sheet.charges).toEqual([null, null, null]);
+    expect(sheet.wordsLabel).toEqual(["Amount", "in words"]);
+    expect(sheet.words).toEqual(["RUPEES TWO THOUSAND ONLY", ""]);
+    expect(sheet.totalInWords).toBeNull();
+    expect(sheet.parties[0].right).toEqual({ text: "GSTIN : 27AAPFU0939F1ZV", accent: true });
+    expect(sheet.terms.at(-1)).toBe(`3) ${COMPOSITION_DECLARATION}`);
+  });
+
+  it("prints a cash memo with no GSTIN, HSN, place of supply or tax rows anywhere", () => {
+    const sheet = sheetOf({
+      documentType: "cash_memo",
+      business: { upi_id: null, bank_name: null, bank_account_name: null, bank_account_number: null, ifsc: null },
+      invoice: { seller_gstin: "27AAPFU0939F1ZV", customer_gstin: "29AAGCB7383J1Z4" },
+    });
+    expect(sheet.title).toBe("CASH MEMO");
+    expect(sheet.columns.map((c) => c.key)).toEqual(["sr", "description", "qty", "rate", "amount"]);
+    expect(sheet.columns.reduce((sum, c) => sum + c.width, 0)).toBeCloseTo(100, 6);
+    expect(sheet.parties.map((p) => p.right?.text ?? null)).toEqual(["Bill No: A/2627/00042", "Bill Date: 12/11/2026", null, null]);
+    expect(sheet.charges).toEqual([]);
+    expect(sheet.bank).toBeNull();
+    expect(sheet.addressRow).toContain("Pune, Maharashtra, 411001");
+    expect(JSON.stringify(sheet)).not.toMatch(/GSTIN|HSN|Place of Supply|Reverse charge|SGST|CGST|IGST|27AAPFU0939F1ZV/);
+  });
+
+  it("prints the tagline and signature title when set, and sensible defaults when not", () => {
+    const plain = buildInvoiceView(fixtureBundle());
+    expect(plain.tagline).toBeNull();
+    expect(plain.signatoryLabel).toBe("Authorised Signatory");
+    expect(buildInvoiceSheet(plain).tagline).toBeNull();
+
+    const set = buildInvoiceView(fixtureBundle({ business: { invoice_tagline: " Dealers in rice ", signatory_label: "Partner" } }));
+    expect(set.tagline).toBe("Dealers in rice");
+    expect(buildInvoiceSheet(set).signatoryLabel).toBe("Partner");
+    expect(buildInvoiceView(fixtureBundle({ business: { signatory_label: "  " } })).signatoryLabel).toBe("Authorised Signatory");
+  });
+
+  it("names a walk-in buyer Cash Sale and shows the phone when there is no address", () => {
+    const walkIn = sheetOf({
+      invoice: { customer_id: null, customer_name: null, customer_phone: null, customer_email: null, customer_address: null, customer_pincode: null, customer_state_code: null },
+    });
+    expect(walkIn.parties.map((p) => p.left?.text ?? null)).toEqual(["Details of Buyer : Cash Sale", null, null, null, null]);
+    const phoneOnly = sheetOf({ invoice: { customer_address: null, customer_pincode: null, customer_state_code: null } });
+    expect(phoneOnly.parties[1].left?.text).toBe("Ph: 98123 45678");
+  });
+
+  it("adds cess, round off, balance due and the note, and numbers terms once", () => {
+    const sheet = sheetOf({
+      items: [fixtureItem(1, "intra", { cess_rate: 12, cess_paise: 12000, total_paise: 130000 })],
+      invoice: { round_off_paise: 50, amount_due_paise: 50000, notes: "Deliver to the back gate" },
+      business: { invoice_terms: "1) No returns\n2. Pay in 7 days\n(3) Subject to Pune jurisdiction" },
+    });
+    expect(sheet.charges.slice(-2)).toEqual([
+      { label: "Add Cess", rate: "", amount: "120.00" },
+      { label: "Round Off", rate: "", amount: "+0.50" },
+    ]);
+    expect(sheet.balanceDue).toBe("500.00");
+    expect(sheet.note).toBe("Note: Deliver to the back gate");
+    expect(sheet.terms).toEqual(["1) No returns", "2) Pay in 7 days", "3) Subject to Pune jurisdiction"]);
+  });
+
+  it("flags a cancelled bill", () => {
+    const sheet = sheetOf({ invoice: { status: "cancelled", cancel_reason: "Billed twice", amount_due_paise: 5000 } });
+    expect(sheet.cancelNote).toBe("This bill was cancelled. Reason: Billed twice");
+    expect(sheet.balanceDue).toBeNull();
+    expect(sheet.bank?.upiId).toBeNull();
+  });
+
+  it("splits words, phones and UPI IDs for the boxes they sit in", () => {
+    expect(splitWords("RUPEES FIFTY ONLY")).toEqual(["RUPEES FIFTY ONLY", ""]);
+    expect(splitWords("RUPEES TWO THOUSAND SEVEN HUNDRED ONLY")).toEqual(["RUPEES TWO THOUSAND", "SEVEN HUNDRED ONLY"]);
+    expect(displayPhone("+919820011001")).toBe("98200 11001");
+    expect(displayPhone("022 2345 6789")).toBe("022 2345 6789");
+    expect(upiIdLines("shop@ybl")).toEqual(["shop@ybl"]);
+    expect(upiIdLines("dcfashion@okhdfcbank")).toEqual(["dcfashion", "@okhdfcbank"]);
   });
 });
 

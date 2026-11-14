@@ -126,7 +126,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
       {isDraft && canCreate ? (
         <Button variant="outline" asChild>
           <Link href={`/app/purchases/${bill.id}/edit`}>
-            <Pencil aria-hidden /> Edit
+            <Pencil aria-hidden /> {readyToPost ? "Edit" : "Complete"}
           </Link>
         </Button>
       ) : null}
@@ -162,16 +162,16 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
 
       {isDraft && !readyToPost ? (
         <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          This draft is not ready to post yet. It still needs{" "}
+          This draft cannot be added to stock yet. It still needs{" "}
           {[
-            !bill.vendor_id ? "a vendor" : null,
-            !bill.vendor_invoice_number ? "the vendor's bill number" : null,
+            !bill.vendor_id ? "the supplier" : null,
+            !bill.vendor_invoice_number ? "the bill number" : null,
             !bill.vendor_invoice_date ? "the bill date" : null,
             items.length === 0 ? "at least one item" : null,
           ]
             .filter(Boolean)
             .join(", ")}
-          .{canCreate ? " Open Edit to fill in the details from the attached bill." : ""}
+          .{canCreate ? " Tap Complete to fill in the details from the bill photo." : ""}
         </p>
       ) : null}
       {bill.status === "cancelled" && bill.cancel_reason ? (
@@ -181,7 +181,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
       <div className="grid gap-5">
         <section className="rounded-xl border p-4">
           <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            <Detail label="Vendor">
+            <Detail label="Supplier">
               {bill.vendor ? (
                 <>
                   {bill.vendor.name}
@@ -191,11 +191,11 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
                 notSet
               )}
             </Detail>
-            <Detail label="Vendor's bill number">{bill.vendor_invoice_number ? <span className="tabular">{bill.vendor_invoice_number}</span> : notSet}</Detail>
+            <Detail label="Bill number">{bill.vendor_invoice_number ? <span className="tabular">{bill.vendor_invoice_number}</span> : notSet}</Detail>
             <Detail label="Bill date">{bill.vendor_invoice_date ? <span className="tabular">{formatDate(bill.vendor_invoice_date)}</span> : notSet}</Detail>
             <Detail label="Received at">{outletName}</Detail>
             <Detail label="Place of supply">{bill.place_of_supply_state ? stateLabel(bill.place_of_supply_state) : notSet}</Detail>
-            <Detail label="GST type">{bill.is_inter_state ? "IGST (vendor in another state)" : "CGST + SGST (same state)"}</Detail>
+            <Detail label="GST type">{bill.is_inter_state ? "IGST (supplier in another state)" : "CGST + SGST (same state)"}</Detail>
             <Detail label="Entered by">
               {who(bill.created_by)}
               <span className="tabular block text-xs text-muted-foreground">{formatDateTime(bill.created_at)}</span>
@@ -362,11 +362,11 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
         {isPosted || payments.length > 0 ? (
           <section aria-labelledby="payments-heading">
             <h2 id="payments-heading" className="mb-2 text-sm font-semibold">
-              Payments to the vendor
+              Payments to the supplier
             </h2>
             {payments.length === 0 ? (
               <p className="rounded-xl border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-                No payments recorded yet.{canCreate ? " Use Record payment when you pay the vendor." : ""}
+                No payments recorded yet.{canCreate ? " Use Record payment when you pay the supplier." : ""}
               </p>
             ) : (
               <div className="overflow-x-auto rounded-xl border">
@@ -405,7 +405,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
 
         <section aria-labelledby="attachments-heading">
           <h2 id="attachments-heading" className="mb-2 text-sm font-semibold">
-            Vendor&apos;s bill
+            Bill photo
           </h2>
           {bill.attachment_paths?.length ? (
             <ul className="flex flex-wrap gap-3">
@@ -415,7 +415,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
             </ul>
           ) : (
             <p className="rounded-xl border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-              No photo or PDF attached.{isDraft && canCreate ? " Open Edit to attach the vendor's bill." : ""}
+              No photo or PDF attached.{isDraft && canCreate ? " Tap Edit to add a photo of the bill." : ""}
             </p>
           )}
         </section>

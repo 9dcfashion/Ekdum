@@ -40,6 +40,8 @@ export function ThermalReceipt({
           <img src={logoSrc} alt="" className="thermal-logo" />
         ) : null}
         <p className="thermal-shop">{view.seller.name}</p>
+        {/* Optional: a slip saved on the device before taglines existed has none. */}
+        {view.tagline ? <p className="thermal-small thermal-bold">{view.tagline}</p> : null}
         {view.seller.legalName ? <p>{view.seller.legalName}</p> : null}
         {view.seller.addressLines.map((line, i) => (
           <p key={i}>{line}</p>
@@ -155,6 +157,10 @@ export function ThermalReceipt({
           ))}
         </div>
       ) : null}
+      <div className="thermal-sign">
+        <p className="thermal-bold">{view.signatoryFor}</p>
+        <p>{view.signatoryLabel}</p>
+      </div>
       {view.footer ? <p className="thermal-center thermal-footer">{view.footer}</p> : null}
     </article>
   );
@@ -200,6 +206,8 @@ export function thermalCss(paper: 80 | 58): string {
 .thermal-declaration { margin-top: 2mm !important; }
 .thermal-terms { margin-top: 2mm; }
 .thermal-footer { margin-top: 2mm !important; }
+.thermal-sign { margin-top: 3mm; text-align: right; break-inside: avoid; }
+.thermal-sign p + p { margin-top: ${paper === 80 ? 9 : 7}mm !important; }
 @media screen {
   .thermal { margin: 16px auto 32px; box-shadow: 0 1px 3px rgb(0 0 0 / 0.15); }
 }

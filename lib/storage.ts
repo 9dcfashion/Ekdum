@@ -5,6 +5,7 @@ export const BUCKETS = {
   purchaseAttachments: "purchase-attachments",
   shipmentReceipts: "shipment-receipts",
   invoicePdfs: "invoice-pdfs",
+  salePhotos: "sale-photos",
 } as const;
 
 /** Public URL of a business logo (the `logos` bucket is public-read). */
@@ -28,4 +29,11 @@ export const UPLOAD_LIMITS = {
   logo: { maxBytes: 1024 * 1024, types: ["image/png", "image/jpeg", "image/webp"] },
   purchaseAttachment: { maxBytes: 10 * 1024 * 1024, types: ["image/png", "image/jpeg", "image/webp", "application/pdf"] },
   shipmentReceipt: { maxBytes: 5 * 1024 * 1024, types: ["image/png", "image/jpeg", "image/webp"] },
+  salePhoto: { maxBytes: 5 * 1024 * 1024, types: ["image/png", "image/jpeg", "image/webp"], maxPerBill: 10 },
 } as const;
+
+/** Photos of goods handed over live under the bill's own folder; the storage policies check both ids. */
+export function salePhotoPath(businessId: string, invoiceId: string, filename: string): string {
+  const safe = filename.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-+|-+$/g, "").slice(-40) || "photo.jpg";
+  return `${businessId}/${invoiceId}/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${safe}`;
+}

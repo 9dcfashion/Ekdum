@@ -30,9 +30,10 @@ export interface CatalogProduct {
 export type Discount = { kind: "amount"; paise: number } | { kind: "percent"; percent: number };
 
 export interface CartLine {
-  /** Row key. One line per product, so this is the product id. */
+  /** Row key: the product id, or `manual-…` for an item typed in at the counter. */
   key: string;
-  productId: string;
+  /** Null for a manual item that is not in the product list (no stock is tracked for it). */
+  productId: string | null;
   name: string;
   sku: string | null;
   barcode: string | null;
@@ -97,6 +98,7 @@ export interface PosContext {
 
 /** Display settings and permissions for the POS screen (not used by the cart maths). */
 export interface PosSettings {
+  businessId: string;
   businessName: string;
   outletName: string;
   upiId: string | null;
@@ -105,6 +107,43 @@ export interface PosSettings {
   canManageCustomers: boolean;
   emailReceiptsEnabled: boolean;
   whatsappReceiptsEnabled: boolean;
+  /** Active GST rates, for manual items. */
+  gstRates: number[];
+  /** Active units, for manual items. */
+  units: Array<{ code: string; name: string; allow_decimal: boolean }>;
+  /** Preset "quick item" buttons (Settings → Quick billing items), in display order. */
+  quickItems: QuickItem[];
+}
+
+/**
+ * A preset item billed by typing only the rate and quantity (e.g. "Necklace",
+ * GST 3%, HSN 7117). It goes on the bill as a manual line: no product, no stock.
+ */
+export interface QuickItem {
+  id: string;
+  name: string;
+  gstRate: number;
+  hsnCode: string | null;
+  unitCode: string;
+  /** From the unit: whether 0.250 makes sense as a quantity. */
+  allowDecimal: boolean;
+  priceIncludesTax: boolean;
+  defaultRatePaise: number | null;
+}
+
+/** An item typed in at the counter because it is not in the product list. */
+export interface ManualItemInput {
+  /** Unique row key, e.g. `manual-${uuid}` (passed in so the cart logic stays pure). */
+  key: string;
+  name: string;
+  /** Up to 3 decimals when the unit allows it. */
+  quantity: string;
+  unitPricePaise: number;
+  priceIncludesTax: boolean;
+  gstRate: number;
+  hsnCode: string;
+  unitCode: string;
+  allowDecimal: boolean;
 }
 
 export interface PaymentEntry {
@@ -207,5 +246,7 @@ export interface PostedBill {
   emailQueued: boolean;
   whatsappQueued: boolean;
   customerEmail: string;
+  /** The customer's mobile on the bill (as typed or saved), for "Send on WhatsApp". Empty when none. */
+  customerPhone: string;
   changePaise: number;
 }

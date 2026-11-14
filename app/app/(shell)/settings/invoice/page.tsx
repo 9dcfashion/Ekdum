@@ -30,13 +30,15 @@ export default async function InvoiceSettingsPage() {
           round_off_enabled: b.round_off_enabled,
           invoice_terms: b.invoice_terms,
           invoice_footer: b.invoice_footer,
+          // Falls back while the invoice-format migration has not been run.
+          signatory_label: b.signatory_label || "Authorised Signatory",
           hsn_digits: b.hsn_digits,
           bos_for_exempt_only: b.bos_for_exempt_only,
           cancel_window_days: b.cancel_window_days,
           allow_negative_stock: b.allow_negative_stock,
           stuck_shipment_days: b.stuck_shipment_days,
         }}
-        preview={preview}
+        preview={{ ...preview, tagline: b.invoice_tagline ?? null }}
         logoPath={b.logo_path}
         brandColor={b.brand_color}
         chargesTax={b.gst_scheme === "regular"}
